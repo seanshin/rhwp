@@ -36,13 +36,13 @@ export class AboutDialog extends ModalDialog {
     // 제품 한글명
     const titleKo = document.createElement('div');
     titleKo.className = 'about-product-name-ko';
-    titleKo.textContent = '한글 문서 호환 저장 도구';
+    titleKo.textContent = 'HWP 오픈소스 편집';
     body.appendChild(titleKo);
 
     // 버전
     const version = document.createElement('div');
     version.className = 'about-version';
-    version.textContent = 'Version 0.6.0';
+    version.textContent = `Version ${__APP_VERSION__}`;
     body.appendChild(version);
 
     // 기술 스택
@@ -81,7 +81,7 @@ export class AboutDialog extends ModalDialog {
     // 저작권
     const copyright = document.createElement('div');
     copyright.className = 'about-copyright';
-    copyright.textContent = '\u00A9 2026';
+    copyright.textContent = '\u00A9 2026 rhwp: Edward Kim';
     body.appendChild(copyright);
 
     return body;

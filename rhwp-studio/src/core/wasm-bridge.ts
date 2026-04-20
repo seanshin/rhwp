@@ -1,7 +1,23 @@
 import init, { HwpDocument, version } from '@wasm/rhwp.js';
 import type { DocumentInfo, PageInfo, PageDef, SectionDef, CursorRect, HitTestResult, LineInfo, TableDimensions, CellInfo, CellBbox, CellProperties, TableProperties, DocumentPosition, MoveVerticalResult, SelectionRect, CharProperties, ParaProperties, CellPathEntry, NavContextEntry, FieldInfoResult, BookmarkInfo } from './types';
+
+/** HWPX 비표준 감지 경고 리포트 (#177). */
+export interface ValidationReport {
+  /** 경고 총 개수 */
+  count: number;
+  /** 경고 종류별 요약 (key: 한국어 설명, value: 개수) */
+  summary: Record<string, number>;
+  /** 개별 경고 목록 */
+  warnings: Array<{
+    section: number;
+    paragraph: number;
+    kind: 'LinesegArrayEmpty' | 'LinesegUncomputed' | 'LinesegTextRunReflow';
+    cell: { ctrl: number; row: number; col: number; innerPara: number } | null;
+  }>;
+}
 import { resolveFont, fontFamilyWithFallback } from './font-substitution';
 import { REGISTERED_FONTS } from './font-loader';
+import type { FileSystemFileHandleLike } from '@/command/file-system-access';
 
 /**
  * CSS font 문자열에서 font-family를 추출하여 폰트 치환을 적용한다.
@@ -32,6 +48,7 @@ export class WasmBridge {
   private doc: HwpDocument | null = null;
   private initialized = false;
   private _fileName = 'document.hwp';
+  private _currentFileHandle: FileSystemFileHandleLike | null = null;
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
@@ -64,6 +81,7 @@ export class WasmBridge {
       this.doc.free();
     }
     this._fileName = fileName ?? 'document.hwp';
+    this._currentFileHandle = null;
     this.doc = new HwpDocument(data);
     this.doc.convertToEditable();
     this.doc.setFileName(this._fileName);
@@ -79,6 +97,7 @@ export class WasmBridge {
     }
     const info: DocumentInfo = JSON.parse(this.doc.createBlankDocument());
     this._fileName = '새 문서.hwp';
+    this._currentFileHandle = null;
     this.doc.setFileName(this._fileName);
     console.log(`[WasmBridge] 새 문서 생성: ${info.pageCount}페이지`);
     return info;
@@ -92,6 +111,14 @@ export class WasmBridge {
     this._fileName = name;
   }
 
+  get currentFileHandle(): FileSystemFileHandleLike | null {
+    return this._currentFileHandle;
+  }
+
+  set currentFileHandle(handle: FileSystemFileHandleLike | null) {
+    this._currentFileHandle = handle;
+  }
+
   get isNewDocument(): boolean {
     return this._fileName === '새 문서.hwp';
   }
@@ -99,6 +126,33 @@ export class WasmBridge {
   exportHwp(): Uint8Array {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.exportHwp();
+  }
+
+  exportHwpx(): Uint8Array {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return this.doc.exportHwpx();
+  }
+
+  getSourceFormat(): string {
+    return this.doc?.getSourceFormat?.() ?? 'hwp';
+  }
+
+  /** HWPX 비표준 감지 경고 조회 (#177). */
+  getValidationWarnings(): ValidationReport {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const raw = (this.doc as any).getValidationWarnings?.();
+    if (!raw) return { count: 0, summary: {}, warnings: [] };
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return { count: 0, summary: {}, warnings: [] };
+    }
+  }
+
+  /** 사용자 명시 요청에 의한 lineseg reflow (#177). 반환: reflow된 문단 수. */
+  reflowLinesegs(): number {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return (this.doc as any).reflowLinesegs?.() ?? 0;
   }
 
   get pageCount(): number {
@@ -138,6 +192,11 @@ export class WasmBridge {
   renderPageToCanvas(pageNum: number, canvas: HTMLCanvasElement, scale = 1.0): void {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     this.doc.renderPageToCanvas(pageNum, canvas, scale);
+  }
+
+  renderPageSvg(pageNum: number): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return this.doc.renderPageSvg(pageNum);
   }
 
   getCursorRect(sec: number, para: number, charOffset: number): CursorRect {
@@ -954,6 +1013,11 @@ export class WasmBridge {
     this.doc.setShowControlCodes(enabled);
   }
 
+  getShowTransparentBorders(): boolean {
+    if (!this.doc) return false;
+    return this.doc.getShowTransparentBorders();
+  }
+
   setShowTransparentBorders(enabled: boolean): void {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     this.doc.setShowTransparentBorders(enabled);
@@ -1189,6 +1253,12 @@ export class WasmBridge {
   setFormValue(sec: number, para: number, ci: number, valueJson: string): { ok: boolean } {
     if (!this.doc || typeof (this.doc as any).setFormValue !== 'function') return { ok: false };
     return JSON.parse((this.doc as any).setFormValue(sec, para, ci, valueJson));
+  }
+
+  /** 셀 내부 양식 개체 값을 설정한다. */
+  setFormValueInCell(sec: number, tablePara: number, tableCi: number, cellIdx: number, cellPara: number, formCi: number, valueJson: string): { ok: boolean } {
+    if (!this.doc || typeof (this.doc as any).setFormValueInCell !== 'function') return { ok: false };
+    return JSON.parse((this.doc as any).setFormValueInCell(sec, tablePara, tableCi, cellIdx, cellPara, formCi, valueJson));
   }
 
   /** 양식 개체 상세 정보를 반환한다. */

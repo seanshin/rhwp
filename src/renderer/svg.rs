@@ -53,6 +53,8 @@ pub struct SvgRenderer {
     overlay_table_bounds: Vec<OverlayTableInfo>,
     /// 디버그 오버레이용: 표/머리말/꼬리말 내부 깊이 (셀 내·헤더 문단 제외)
     overlay_skip_depth: u32,
+    /// 디버그 오버레이용: 현재 페이지의 메인 섹션 인덱스 (-1이면 미설정)
+    overlay_page_section: i32,
     /// 생성된 화살표 마커 ID 집합 (중복 방지)
     arrow_marker_ids: std::collections::HashSet<String>,
     /// 폰트 임베딩 모드
@@ -101,6 +103,7 @@ impl SvgRenderer {
             overlay_para_bounds: std::collections::HashMap::new(),
             overlay_table_bounds: Vec::new(),
             overlay_skip_depth: 0,
+            overlay_page_section: -1,
             arrow_marker_ids: std::collections::HashSet::new(),
             font_embed_mode: FontEmbedMode::None,
             font_paths: Vec::new(),
@@ -293,12 +296,40 @@ impl SvgRenderer {
             }
             RenderNodeType::Equation(eq) => {
                 // 수식 SVG 조각을 bbox 위치에 배치
-                self.output.push_str(&format!(
-                    "<g transform=\"translate({},{})\">\n",
-                    node.bbox.x, node.bbox.y,
-                ));
+                // HWP 저장 영역(bbox)과 레이아웃 산출 크기(layout_box)가 다를 수 있으므로
+                // bbox 너비에 맞춰 스케일링
+                let scale_x = if eq.layout_box.width > 0.0 && node.bbox.width > 0.0 {
+                    node.bbox.width / eq.layout_box.width
+                } else {
+                    1.0
+                };
+                if (scale_x - 1.0).abs() > 0.01 {
+                    self.output.push_str(&format!(
+                        "<g transform=\"translate({},{}) scale({:.4},1)\">\n",
+                        node.bbox.x, node.bbox.y, scale_x,
+                    ));
+                } else {
+                    self.output.push_str(&format!(
+                        "<g transform=\"translate({},{})\">\n",
+                        node.bbox.x, node.bbox.y,
+                    ));
+                }
                 self.output.push_str(&eq.svg_content);
                 self.output.push_str("</g>\n");
+                // 폰트 임베딩: 수식에서 사용된 글자 수집
+                if self.font_embed_mode != FontEmbedMode::None {
+                    let codepoints = self.font_codepoints
+                        .entry("Latin Modern Math".to_string())
+                        .or_default();
+                    // SVG <text> 요소 내부의 텍스트에서 문자 추출
+                    for segment in eq.svg_content.split("</text>") {
+                        if let Some(start) = segment.rfind('>') {
+                            for ch in segment[start + 1..].chars() {
+                                codepoints.insert(ch);
+                            }
+                        }
+                    }
+                }
             }
             RenderNodeType::FormObject(form) => {
                 self.render_form_object(form, &node.bbox);
@@ -327,48 +358,81 @@ impl SvgRenderer {
             match &node.node_type {
                 RenderNodeType::TextLine(tl) => {
                     if self.overlay_skip_depth == 0 {
-                        if let Some(pi) = tl.para_index {
-                            let si = tl.section_index.unwrap_or(0);
-                            // (section, para) 복합키로 섹션 간 구분
-                            let key = si * 100000 + pi;
-                            let entry = self.overlay_para_bounds.entry(key).or_insert(OverlayBounds {
-                                section_index: si,
-                                x: node.bbox.x, y: node.bbox.y,
-                                width: node.bbox.width, height: node.bbox.height,
-                            });
-                            // 기존 bounds 확장 (여러 줄이 하나의 문단)
-                            let min_x = entry.x.min(node.bbox.x);
-                            let min_y = entry.y.min(node.bbox.y);
-                            let max_x = (entry.x + entry.width).max(node.bbox.x + node.bbox.width);
-                            let max_y = (entry.y + entry.height).max(node.bbox.y + node.bbox.height);
-                            entry.x = min_x;
-                            entry.y = min_y;
-                            entry.width = max_x - min_x;
-                            entry.height = max_y - min_y;
+                        // section_index가 없는 TextLine은 Shape 내부 등 비본문 요소 — 제외
+                        if let (Some(pi), Some(si)) = (tl.para_index, tl.section_index) {
+                            // 페이지 메인 섹션 자동 감지 (처음 등장하는 섹션이 메인)
+                            if self.overlay_page_section == -1 {
+                                self.overlay_page_section = si as i32;
+                            }
+                            // 페이지 메인 섹션이 아닌 섹션 문단은 오버레이에서 제외
+                            // (구역 정의 섹션, 다른 섹션 나누기 문단 등)
+                            if si as i32 != self.overlay_page_section {
+                                // skip
+                            } else {
+                                // (section, para) 복합키로 섹션 간 구분
+                                let key = si * 100000 + pi;
+                                let entry = self.overlay_para_bounds.entry(key).or_insert(OverlayBounds {
+                                    section_index: si,
+                                    x: node.bbox.x, y: node.bbox.y,
+                                    width: node.bbox.width, height: node.bbox.height,
+                                });
+                                // 기존 bounds 확장 (여러 줄이 하나의 문단)
+                                let min_x = entry.x.min(node.bbox.x);
+                                let min_y = entry.y.min(node.bbox.y);
+                                let max_x = (entry.x + entry.width).max(node.bbox.x + node.bbox.width);
+                                let max_y = (entry.y + entry.height).max(node.bbox.y + node.bbox.height);
+                                entry.x = min_x;
+                                entry.y = min_y;
+                                entry.width = max_x - min_x;
+                                entry.height = max_y - min_y;
+                            }
                         }
                     }
                 }
                 RenderNodeType::Table(tbl) => {
                     if let (Some(pi), Some(ci)) = (tbl.para_index, tbl.control_index) {
                         if self.overlay_skip_depth == 0 {
-                            self.overlay_table_bounds.push(OverlayTableInfo {
-                                section_index: tbl.section_index.unwrap_or(0),
-                                para_index: pi,
-                                control_index: ci,
-                                x: node.bbox.x,
-                                y: node.bbox.y,
-                                width: node.bbox.width,
-                                height: node.bbox.height,
-                                row_count: tbl.row_count,
-                                col_count: tbl.col_count,
-                            });
+                            let tbl_si = tbl.section_index.unwrap_or(0);
+                            // 페이지 메인 섹션 자동 감지
+                            if self.overlay_page_section == -1 {
+                                self.overlay_page_section = tbl_si as i32;
+                            }
+                            if tbl_si as i32 == self.overlay_page_section {
+                                self.overlay_table_bounds.push(OverlayTableInfo {
+                                    section_index: tbl_si,
+                                    para_index: pi,
+                                    control_index: ci,
+                                    x: node.bbox.x,
+                                    y: node.bbox.y,
+                                    width: node.bbox.width,
+                                    height: node.bbox.height,
+                                    row_count: tbl.row_count,
+                                    col_count: tbl.col_count,
+                                });
+                                // 표를 포함하는 문단 bounds도 확장 (텍스트 없는 문단 처리)
+                                let key = tbl_si * 100000 + pi;
+                                let entry = self.overlay_para_bounds.entry(key).or_insert(OverlayBounds {
+                                    section_index: tbl_si,
+                                    x: node.bbox.x, y: node.bbox.y,
+                                    width: node.bbox.width, height: node.bbox.height,
+                                });
+                                let min_x = entry.x.min(node.bbox.x);
+                                let min_y = entry.y.min(node.bbox.y);
+                                let max_x = (entry.x + entry.width).max(node.bbox.x + node.bbox.width);
+                                let max_y = (entry.y + entry.height).max(node.bbox.y + node.bbox.height);
+                                entry.x = min_x;
+                                entry.y = min_y;
+                                entry.width = max_x - min_x;
+                                entry.height = max_y - min_y;
+                            }
                         }
                     }
                     self.overlay_skip_depth += 1;
                 }
-                // 머리말/꼬리말/바탕쪽/각주: body 외 영역 제외
+                // 머리말/꼬리말/바탕쪽/각주/텍스트박스/그룹: body 외 영역 제외
                 RenderNodeType::Header | RenderNodeType::Footer
-                | RenderNodeType::MasterPage | RenderNodeType::FootnoteArea => {
+                | RenderNodeType::MasterPage | RenderNodeType::FootnoteArea
+                | RenderNodeType::TextBox | RenderNodeType::Group(_) => {
                     self.overlay_skip_depth += 1;
                 }
                 _ => {}
@@ -384,7 +448,8 @@ impl SvgRenderer {
             match &node.node_type {
                 RenderNodeType::Table(_)
                 | RenderNodeType::Header | RenderNodeType::Footer
-                | RenderNodeType::MasterPage | RenderNodeType::FootnoteArea => {
+                | RenderNodeType::MasterPage | RenderNodeType::FootnoteArea
+                | RenderNodeType::TextBox | RenderNodeType::Group(_) => {
                     self.overlay_skip_depth = self.overlay_skip_depth.saturating_sub(1);
                 }
                 _ => {}
@@ -925,6 +990,12 @@ impl SvgRenderer {
             }
         };
 
+        // 그림 효과(그레이스케일/흑백) → SVG 필터 래핑
+        let effect_filter_id = self.ensure_image_effect_filter(img.effect);
+        if let Some(ref fid) = effect_filter_id {
+            self.output.push_str(&format!("<g filter=\"url(#{})\">\n", fid));
+        }
+
         let mime_type = detect_image_mime_type(data);
 
         // WMF → SVG 변환 (브라우저는 WMF를 렌더링할 수 없으므로 SVG로 변환)
@@ -1014,6 +1085,56 @@ impl SvgRenderer {
                 self.render_positioned_image(&render_data, &data_uri, bbox, fill_mode, img.original_size);
             }
         }
+
+        if effect_filter_id.is_some() {
+            self.output.push_str("</g>\n");
+        }
+    }
+
+    /// 그림 효과(ImageEffect)에 해당하는 SVG 필터를 defs에 보장하고 ID를 반환한다.
+    /// RealPic(기본)은 필터가 필요 없으므로 None 반환.
+    fn ensure_image_effect_filter(&mut self, effect: crate::model::image::ImageEffect) -> Option<String> {
+        use crate::model::image::ImageEffect;
+        let (id, def) = match effect {
+            ImageEffect::RealPic => return None,
+            ImageEffect::GrayScale => (
+                "rhwp-img-grayscale",
+                "<filter id=\"rhwp-img-grayscale\"><feColorMatrix type=\"matrix\" values=\"\
+                    0.299 0.587 0.114 0 0 \
+                    0.299 0.587 0.114 0 0 \
+                    0.299 0.587 0.114 0 0 \
+                    0 0 0 1 0\"/></filter>\n",
+            ),
+            ImageEffect::BlackWhite => (
+                "rhwp-img-blackwhite",
+                "<filter id=\"rhwp-img-blackwhite\">\
+                    <feColorMatrix type=\"matrix\" values=\"\
+                        0.299 0.587 0.114 0 0 \
+                        0.299 0.587 0.114 0 0 \
+                        0.299 0.587 0.114 0 0 \
+                        0 0 0 1 0\"/>\
+                    <feComponentTransfer>\
+                        <feFuncR type=\"discrete\" tableValues=\"0 1\"/>\
+                        <feFuncG type=\"discrete\" tableValues=\"0 1\"/>\
+                        <feFuncB type=\"discrete\" tableValues=\"0 1\"/>\
+                    </feComponentTransfer>\
+                </filter>\n",
+            ),
+            // Pattern8x8은 SVG 필터로 표현하기 어려워 그레이스케일로 폴백
+            ImageEffect::Pattern8x8 => (
+                "rhwp-img-grayscale",
+                "<filter id=\"rhwp-img-grayscale\"><feColorMatrix type=\"matrix\" values=\"\
+                    0.299 0.587 0.114 0 0 \
+                    0.299 0.587 0.114 0 0 \
+                    0.299 0.587 0.114 0 0 \
+                    0 0 0 1 0\"/></filter>\n",
+            ),
+        };
+        let def_str = def.to_string();
+        if !self.defs.iter().any(|d| d == &def_str) {
+            self.defs.push(def_str);
+        }
+        Some(id.to_string())
     }
 
     /// 이미지를 원래 크기로 지정 위치에 배치 (배치 모드)
@@ -1567,6 +1688,10 @@ impl Renderer for SvgRenderer {
         self.defs.clear();
         self.gradient_counter = 0;
         self.arrow_marker_ids.clear();
+        self.overlay_para_bounds.clear();
+        self.overlay_table_bounds.clear();
+        self.overlay_skip_depth = 0;
+        self.overlay_page_section = -1;
         self.output.push_str(&format!(
             "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">\n",
             width, height, width, height,
@@ -2057,6 +2182,7 @@ fn known_font_filenames(font_name: &str) -> Vec<&'static str> {
         "HY그래픽" | "HYGraphic-Medium" => vec!["HYGPRM.TTF"],
         "HY견명조" | "HYMyeongJo-Extra" => vec!["HYMJRE.TTF"],
         "HY신명조" => vec!["HYSNMJ.TTF", "hamchob-r.ttf"],
+        "Latin Modern Math" => vec!["latinmodern-math.otf", "LatinModernMath-Regular.otf", "lmmath-regular.otf"],
         "맑은 고딕" | "Malgun Gothic" => vec!["malgun.ttf", "MalgunGothic.ttf"],
         "바탕" | "Batang" => vec!["batang.ttc", "BATANG.TTC", "hamchob-r.ttf"],
         "돋움" | "Dotum" => vec!["dotum.ttc", "DOTUM.TTC", "hamchod-r.ttf"],

@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::model::{ColorRef, Rect};
 use crate::model::style::ImageFillMode;
+use crate::model::image::ImageEffect;
 use super::{TextStyle, ShapeStyle, LineStyle, PathCommand, GradientFillInfo};
 use super::composer::CharOverlapInfo;
 use super::layout::CellContext;
@@ -234,12 +235,15 @@ pub struct FormObjectNode {
     pub enabled: bool,
     /// 문서 위치: 구역 인덱스
     pub section_index: usize,
-    /// 문서 위치: 문단 인덱스
+    /// 문서 위치: 문단 인덱스 (셀 내부인 경우 셀 내 문단 인덱스)
     pub para_index: usize,
     /// 문서 위치: 컨트롤 인덱스
     pub control_index: usize,
     /// 양식 개체 이름
     pub name: String,
+    /// 셀 내부 위치 (표 셀 안에 있는 경우)
+    /// (table_para_index, table_control_index, cell_index, cell_para_index)
+    pub cell_location: Option<(usize, usize, usize, usize)>,
 }
 
 /// 바운딩 박스 (위치 + 크기, 픽셀 단위)
@@ -600,6 +604,8 @@ pub struct ImageNode {
     /// 렌더러에서 이미지 원본 px 크기와 비교하여 source rect 계산
     /// None이면 전체 이미지 표시
     pub crop: Option<(i32, i32, i32, i32)>,
+    /// 그림 효과 (실사/그레이스케일/흑백/패턴)
+    pub effect: ImageEffect,
 }
 
 impl ImageNode {
@@ -610,6 +616,7 @@ impl ImageNode {
             fill_mode: None, original_size: None,
             transform: ShapeTransform::default(),
             crop: None,
+            effect: ImageEffect::RealPic,
         }
     }
 }
