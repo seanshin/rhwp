@@ -53,47 +53,10 @@ struct DocumentView: View {
         .background(Color(UIColor.systemBackground))
     }
 
-    // MARK: - 다중 페이지 스크롤 (뷰포트 너비 맞춤)
+    // MARK: - 다중 페이지 스크롤 (UIScrollView 기반 팬/줌)
 
     private var pageScrollView: some View {
-        GeometryReader { geo in
-            let viewportWidth = geo.size.width - 16   // 좌우 여백 8씩
-            ScrollView {
-                LazyVStack(spacing: 12) {
-                    ForEach(0..<viewModel.pageCount, id: \.self) { page in
-                        let size = viewModel.pageSize(at: page)
-                        let scale = size.width > 0 ? min(1.0, viewportWidth / size.width) : 1.0
-                        HStack {
-                            Spacer(minLength: 0)
-                            PageCanvasView(
-                                renderTree: viewModel.pageTrees[page],
-                                pageHeight: size.height,
-                                document: viewModel.document
-                            )
-                            .frame(width: CGFloat(size.width), height: CGFloat(size.height))
-                            .background(Color.white)
-                            .shadow(color: .black.opacity(0.08), radius: 3, x: 0, y: 1)
-                            .scaleEffect(scale, anchor: .center)
-                            .frame(
-                                width: CGFloat(size.width) * scale,
-                                height: CGFloat(size.height) * scale
-                            )
-                            Spacer(minLength: 0)
-                        }
-                        .onAppear {
-                            viewModel.loadPage(page)
-                            viewModel.currentPage = page
-                        }
-                        .onDisappear {
-                            viewModel.unloadPage(page)
-                        }
-                    }
-                }
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity)
-            }
-            .background(Color(UIColor.systemGroupedBackground))
-        }
+        PagedScrollView(viewModel: viewModel)
     }
 
     // MARK: - 에러
