@@ -145,7 +145,7 @@ document.getElementById('viewer').innerHTML = doc.renderPageSvg(0);
 ```bash
 cargo build                    # Development build
 cargo build --release          # Release build
-cargo test                     # Run tests (783+ tests)
+cargo test                     # Run tests (793+ tests)
 ```
 
 ### WASM Build
@@ -292,7 +292,7 @@ The `mydocs/` directory is not documentation about the code — it's documentati
 |--|-------------|-------------|
 | **Human role** | Accept AI output | Direct, review, decide |
 | **Planning** | None — "just build it" | Written plan → approval → execution |
-| **Quality gate** | Hope it works | 783 tests + Clippy + CI + code review |
+| **Quality gate** | Hope it works | 793 tests + Clippy + CI + code review |
 | **Debugging** | Ask AI to fix AI's bugs | Human diagnoses, AI implements fix |
 | **Architecture** | Emergent (accidental) | Deliberate (CQRS, dependency direction) |
 | **Documentation** | None | 724 files of process records |
