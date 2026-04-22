@@ -779,9 +779,6 @@ impl LayoutEngine {
             // 번호/글머리표 마커: 모든 줄에서 마커 폭만큼 가용폭 차감 (행잉 인덴트)
             let num_offset = if numbering_width > 0.0 { numbering_width } else { 0.0 };
             let available_width = col_area.width - effective_margin_left - margin_right - inline_offset - num_offset;
-            // auto_tab_right용 폭: margin_left와 무관하게 셀/단 우측 끝 기준
-            // (margin_left가 다른 문단에서도 right tab 위치가 동일하도록)
-            let right_tab_width = col_area.width - margin_right;
 
 
             // 텍스트 정렬을 위한 전체 줄 폭 계산 (자연 폭, 추가 간격 미포함)
@@ -806,8 +803,7 @@ impl LayoutEngine {
                 ts.default_tab_width = tab_width;
                 ts.tab_stops = tab_stops.clone();
                 ts.auto_tab_right = auto_tab_right;
-                // right tab 정렬 위치는 margin_left와 무관하게 셀/단 우측 끝 기준
-                ts.available_width = right_tab_width;
+                ts.available_width = available_width;
                 // 교차 run 오른쪽/가운데 탭: 이 run의 시작 위치를 역방향으로 조정
                 if let Some((tab_pos, tab_type)) = pending_right_tab_est.take() {
                     ts.line_x_offset = est_x;
@@ -862,7 +858,7 @@ impl LayoutEngine {
                         let abs_before = ts.line_x_offset + w_before;
                         let tw = if tab_width > 0.0 { tab_width } else { 48.0 };
                         let (tp, tt, _) = find_next_tab_stop(
-                            abs_before, &tab_stops, tw, auto_tab_right, right_tab_width,
+                            abs_before, &tab_stops, tw, auto_tab_right, available_width,
                         );
                         if tt == 1 || tt == 2 {
                             pending_right_tab_est = Some((tp, tt));
@@ -1105,7 +1101,7 @@ impl LayoutEngine {
                 text_style.default_tab_width = tab_width;
                 text_style.tab_stops = tab_stops.clone();
                 text_style.auto_tab_right = auto_tab_right;
-                text_style.available_width = right_tab_width;
+                text_style.available_width = available_width;
                 text_style.inline_tabs = composed.tab_extended.clone();
                 // 교차 run 오른쪽/가운데 탭: 이전 run이 \t로 끝났고
                 // 해당 탭이 오른쪽/가운데 탭이면 이 run을 역방향으로 이동
@@ -1152,7 +1148,7 @@ impl LayoutEngine {
                         let abs_before = text_style.line_x_offset + w_before;
                         let tw = if tab_width > 0.0 { tab_width } else { 48.0 };
                         let (tp, tt, _) = find_next_tab_stop(
-                            abs_before, &tab_stops, tw, auto_tab_right, right_tab_width,
+                            abs_before, &tab_stops, tw, auto_tab_right, available_width,
                         );
                         if tt == 1 || tt == 2 {
                             pending_right_tab_render = Some((tp, tt));
