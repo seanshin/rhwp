@@ -332,6 +332,53 @@ impl LayoutEngine {
             split_row_range, row_y_shift,
         );
 
+
+        // ── 5-1. 표 전체 외곽 테두리 보충 ──
+        // 셀 테두리만으로는 표 외곽이 비어있을 수 있음 (셀의 바깥 면 테두리가 None인 경우)
+        // table.border_fill_id의 borders를 외곽 엣지에 fallback으로 채움
+        if table.border_fill_id > 0 {
+            let tbl_idx = (table.border_fill_id as usize).saturating_sub(1);
+            if let Some(tbl_bs) = styles.border_styles.get(tbl_idx) {
+                let borders = &tbl_bs.borders; // [left, right, top, bottom]
+                // 상단 외곽 (h_edges[0])
+                for c in 0..col_count {
+                    if h_edges[0][c].is_none() {
+                        let b = &borders[2]; // top
+                        if !matches!(b.line_type, crate::model::style::BorderLineType::None) && b.width > 0 {
+                            h_edges[0][c] = Some(*b);
+                        }
+                    }
+                }
+                // 하단 외곽 (h_edges[row_count])
+                for c in 0..col_count {
+                    if h_edges[row_count][c].is_none() {
+                        let b = &borders[3]; // bottom
+                        if !matches!(b.line_type, crate::model::style::BorderLineType::None) && b.width > 0 {
+                            h_edges[row_count][c] = Some(*b);
+                        }
+                    }
+                }
+                // 좌측 외곽 (v_edges[0])
+                for r in 0..row_count {
+                    if v_edges[0][r].is_none() {
+                        let b = &borders[0]; // left
+                        if !matches!(b.line_type, crate::model::style::BorderLineType::None) && b.width > 0 {
+                            v_edges[0][r] = Some(*b);
+                        }
+                    }
+                }
+                // 우측 외곽 (v_edges[col_count])
+                for r in 0..row_count {
+                    if v_edges[col_count][r].is_none() {
+                        let b = &borders[1]; // right
+                        if !matches!(b.line_type, crate::model::style::BorderLineType::None) && b.width > 0 {
+                            v_edges[col_count][r] = Some(*b);
+                        }
+                    }
+                }
+            }
+        }
+
         // ── 6. 테두리 렌더링 ──
         table_node.children.extend(render_edge_borders(
             tree, &h_edges, &v_edges, &row_col_x, &row_y, table_x, table_y,
