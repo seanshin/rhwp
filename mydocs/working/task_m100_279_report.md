@@ -69,7 +69,56 @@ commit `78330fd`에서 revert된 수정은 `ts.available_width`를 변경하여 
 
 ---
 
-## 5. 관련 이슈
+## 5. 추가 수정 — 장제목 두 자리 페이지번호 탭 정렬
+
+**커밋**: `3c06781`
+
+### 현상
+
+- 장제목 단일 자리 페이지번호 "3": x=699.76 ✓
+- 장제목 두 자리 페이지번호 "16" 첫 자리: x=681.09 ✗ (목표 ~699.76)
+- 소제목 두 자리 페이지번호 "14" 첫 자리: x=699.88 ✓
+
+### 근본 원인
+
+교차 run 오른쪽 탭 렌더 패스에서 run B 전체 폭(`next_w`)으로 역방향 이동:
+
+```
+x = col_area.x + tab_pos - next_w
+```
+
+- 단일 자리: run B `" "` (next_w=10) → 공백 뒤 run C `"3"` 이 tab_pos에서 시작 ✓
+- 두 자리: run B `" 16"` (next_w=28) → `"1"` 이 tab_pos - 28 + 10 = tab_pos - 18 위치 ✗
+
+### 수정
+
+**파일**: `src/renderer/layout/paragraph_layout.rs`
+
+```rust
+// 수정 전:
+1 => x = col_area.x + tab_pos - next_w,
+
+// 수정 후:
+1 => {
+    let trimmed = run.text.trim_start();
+    let leading_ws = &run.text[..run.text.len() - trimmed.len()];
+    let leading_ws_w = if leading_ws.is_empty() { 0.0 }
+                       else { estimate_text_width(leading_ws, &text_style) };
+    x = col_area.x + tab_pos - leading_ws_w;
+}
+```
+
+### 결과
+
+| 항목 | 수정 전 | 수정 후 |
+|------|---------|---------|
+| 장제목 두 자리 "16" 첫 자리 x | 681.09px | **700.09px** ✅ |
+| 장제목 단일 자리 "3" x | 699.76px | 699.76px (불변) ✅ |
+| 소제목 두 자리 "14" 첫 자리 x | 699.88px | 699.88px (불변) ✅ |
+
+---
+
+## 6. 관련 이슈
 
 - Issue #267 (right tab 선행 공백) — 관련 선행 수정 (PR #273)
 - Issue #274 — 이번 수정으로 해결됨 (superseded)
