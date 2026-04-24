@@ -98,8 +98,11 @@ pub struct TextStyle {
     pub tab_stops: Vec<TabStop>,
     /// 문단 오른쪽 끝 자동 탭 여부
     pub auto_tab_right: bool,
-    /// 사용 가능 너비 (px, auto_tab_right 계산용)
+    /// 사용 가능 너비 (px, left/center 탭 클램핑 + auto_tab_right 계산용)
     pub available_width: f64,
+    /// 오른쪽 탭(type=1) 클램핑 기준 — 컬럼 우측 경계 (≈ available_width + effective_margin_left)
+    /// 0이면 available_width 대체 사용
+    pub col_right: f64,
     /// 단 시작으로부터 run 시작 위치 (탭 절대좌표 변환용)
     pub line_x_offset: f64,
     /// 탭 리더 정보 (compute_char_positions 후 채움)
@@ -170,6 +173,7 @@ impl Default for TextStyle {
             tab_stops: Vec::new(),
             auto_tab_right: false,
             available_width: 0.0,
+            col_right: 0.0,
             line_x_offset: 0.0,
             tab_leaders: Vec::new(),
             inline_tabs: Vec::new(),

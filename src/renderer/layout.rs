@@ -2860,7 +2860,7 @@ impl LayoutEngine {
                 ts.line_x_offset = est_x;
                 if ch == '\t' {
                     let (tp, _, _) = find_next_tab_stop(
-                        est_x, &ts.tab_stops, ts.default_tab_width, ts.auto_tab_right, ts.available_width,
+                        est_x, &ts.tab_stops, ts.default_tab_width, ts.auto_tab_right, ts.available_width, ts.col_right,
                     );
                     est_x = tp;
                 } else {
