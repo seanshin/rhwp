@@ -1114,16 +1114,20 @@ impl LayoutEngine {
                     let next_w = estimate_text_width(&run.text, &text_style);
                     match tab_type {
                         1 => {
-                            // 오른쪽 탭: 선행 공백은 tab_pos 앞 채움으로 취급
-                            // 실제 내용(숫자 등)이 tab_pos에서 시작하도록 선행 공백 폭만 빼기
-                            let trimmed = run.text.trim_start();
-                            let leading_ws = &run.text[..run.text.len() - trimmed.len()];
-                            let leading_ws_w = if leading_ws.is_empty() {
-                                0.0
-                            } else {
-                                estimate_text_width(leading_ws, &text_style)
-                            };
-                            x = col_area.x + tab_pos - leading_ws_w;
+                            // 오른쪽 탭: 현재 run + 이후 모든 run의 총 폭 합산
+                            // right edge = tab_pos_abs 가 되도록 역방향 이동
+                            let mut total_w = next_w;
+                            for fr in &comp_line.runs[(run_idx + 1)..] {
+                                let mut fts = resolved_to_text_style(
+                                    styles, fr.char_style_id, fr.lang_index,
+                                );
+                                fts.default_tab_width = tab_width;
+                                fts.tab_stops = tab_stops.clone();
+                                fts.auto_tab_right = auto_tab_right;
+                                fts.available_width = available_width;
+                                total_w += estimate_text_width(&fr.text, &fts);
+                            }
+                            x = col_area.x + tab_pos - total_w;
                         }
                         2 => x = col_area.x + tab_pos - next_w / 2.0,
                         _ => {}
@@ -1156,7 +1160,7 @@ impl LayoutEngine {
                 }
                 // 교차 run 오른쪽/가운데 탭 감지:
                 // run이 \t로 끝나면 해당 탭의 종류를 확인하여 다음 run 조정에 사용
-                if has_tabs && run.text.ends_with('\t') {
+                if has_tabs && run.text.trim_end_matches(' ').ends_with('\t') {
                     if let Some(last_tab_pos) = run.text.rfind('\t') {
                         let text_before_tab = &run.text[..last_tab_pos];
                         let w_before = estimate_text_width(text_before_tab, &text_style);
