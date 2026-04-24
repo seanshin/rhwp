@@ -779,6 +779,8 @@ impl LayoutEngine {
             // 번호/글머리표 마커: 모든 줄에서 마커 폭만큼 가용폭 차감 (행잉 인덴트)
             let num_offset = if numbering_width > 0.0 { numbering_width } else { 0.0 };
             let available_width = col_area.width - effective_margin_left - margin_right - inline_offset - num_offset;
+            // 오른쪽 탭(type=1) 클램핑 기준: 컬럼 우측 경계 (좌여백 포함, 문단 상대값이 아님)
+            let col_right = available_width + effective_margin_left;
 
 
             // 텍스트 정렬을 위한 전체 줄 폭 계산 (자연 폭, 추가 간격 미포함)
@@ -804,6 +806,7 @@ impl LayoutEngine {
                 ts.tab_stops = tab_stops.clone();
                 ts.auto_tab_right = auto_tab_right;
                 ts.available_width = available_width;
+                ts.col_right = col_right;
                 // 교차 run 오른쪽/가운데 탭: 이 run의 시작 위치를 역방향으로 조정
                 if let Some((tab_pos, tab_type)) = pending_right_tab_est.take() {
                     ts.line_x_offset = est_x;
@@ -858,7 +861,7 @@ impl LayoutEngine {
                         let abs_before = ts.line_x_offset + w_before;
                         let tw = if tab_width > 0.0 { tab_width } else { 48.0 };
                         let (tp, tt, _) = find_next_tab_stop(
-                            abs_before, &tab_stops, tw, auto_tab_right, available_width,
+                            abs_before, &tab_stops, tw, auto_tab_right, available_width, col_right,
                         );
                         if tt == 1 || tt == 2 {
                             pending_right_tab_est = Some((tp, tt));
@@ -1102,6 +1105,7 @@ impl LayoutEngine {
                 text_style.tab_stops = tab_stops.clone();
                 text_style.auto_tab_right = auto_tab_right;
                 text_style.available_width = available_width;
+                text_style.col_right = col_right;
                 text_style.inline_tabs = composed.tab_extended.clone();
                 // 교차 run 오른쪽/가운데 탭: 이전 run이 \t로 끝났고
                 // 해당 탭이 오른쪽/가운데 탭이면 이 run을 역방향으로 이동
@@ -1148,7 +1152,7 @@ impl LayoutEngine {
                         let abs_before = text_style.line_x_offset + w_before;
                         let tw = if tab_width > 0.0 { tab_width } else { 48.0 };
                         let (tp, tt, _) = find_next_tab_stop(
-                            abs_before, &tab_stops, tw, auto_tab_right, available_width,
+                            abs_before, &tab_stops, tw, auto_tab_right, available_width, col_right,
                         );
                         if tt == 1 || tt == 2 {
                             pending_right_tab_render = Some((tp, tt));

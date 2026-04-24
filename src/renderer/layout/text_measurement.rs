@@ -58,20 +58,26 @@ fn style_params(style: &TextStyle) -> (f64, f64, f64) {
 ///
 /// Returns (position, tab_type, fill_type).
 /// 커스텀 탭이 없으면 기본 등간격 탭을 사용한다.
+///
+/// - `available_width`: 단 너비 - 좌여백 - 우여백 (문단 상대값). left/center 탭 클램핑에 사용.
+/// - `col_right`: 단 우측 경계 (컬럼 기준 절대값 ≈ available_width + effective_margin_left).
+///   right 탭(type=1) 클램핑에 사용. 들여쓰기가 있어도 동일한 우측 정렬 위치를 유지한다.
 pub(crate) fn find_next_tab_stop(
     abs_x: f64,
     tab_stops: &[TabStop],
     default_tab_width: f64,
     auto_tab_right: bool,
     available_width: f64,
+    col_right: f64,  // 0이면 available_width로 fallback
 ) -> (f64, u8, u8) {
+    let col_right = if col_right > 0.0 { col_right } else { available_width };
     // 커스텀 탭 정지에서 현재 위치 뒤의 첫 번째 검색
     for ts in tab_stops {
-        // type=1(오른쪽) 탭은 단 기준 절대 위치이므로 available_width 클램핑 제외.
-        // 들여쓰기(left_margin)가 있는 문단에서도 오른쪽 탭이 동일 위치에 정렬되도록 한다.
-        // type=0(왼쪽)/2(가운데) 탭은 종전대로 클램핑하여 텍스트 영역 밖으로 넘어가지 않게 한다.
-        let pos = if ts.tab_type != 1 && ts.position > available_width && available_width > 0.0 {
-            available_width
+        // type=1(오른쪽) 탭: 컬럼 우측 경계(col_right)로 클램핑 — 들여쓰기 문단에서도 동일 위치
+        // type=0(왼쪽)/2(가운데) 탭: 문단 가용폭(available_width)으로 클램핑
+        let clamp = if ts.tab_type == 1 { col_right } else { available_width };
+        let pos = if clamp > 0.0 && ts.position > clamp {
+            clamp
         } else {
             ts.position
         };
@@ -135,7 +141,7 @@ pub fn extract_tab_leaders_with_extended(
                 let abs_before = style.line_x_offset + before_x;
                 let (_, _, ft) = find_next_tab_stop(
                     abs_before, &style.tab_stops, tab_w,
-                    style.auto_tab_right, style.available_width,
+                    style.auto_tab_right, style.available_width, style.col_right,
                 );
                 ft
             } else {
@@ -198,7 +204,7 @@ impl TextMeasurer for EmbeddedTextMeasurer {
                     let abs_x = style.line_x_offset + total;
                     let (tab_pos, tab_type, _) = find_next_tab_stop(
                         abs_x, &style.tab_stops, tab_w,
-                        style.auto_tab_right, style.available_width,
+                        style.auto_tab_right, style.available_width, style.col_right,
                     );
                     let rel_tab = tab_pos - style.line_x_offset;
                     match tab_type {
@@ -284,7 +290,7 @@ impl TextMeasurer for EmbeddedTextMeasurer {
                     let abs_x = style.line_x_offset + x;
                     let (tab_pos, tab_type, _) = find_next_tab_stop(
                         abs_x, &style.tab_stops, tab_w,
-                        style.auto_tab_right, style.available_width,
+                        style.auto_tab_right, style.available_width, style.col_right,
                     );
                     let rel_tab = tab_pos - style.line_x_offset;
                     match tab_type {
@@ -509,7 +515,7 @@ impl TextMeasurer for WasmTextMeasurer {
                     let abs_x = style.line_x_offset + total;
                     let (tab_pos, tab_type, _) = find_next_tab_stop(
                         abs_x, &style.tab_stops, tab_w,
-                        style.auto_tab_right, style.available_width,
+                        style.auto_tab_right, style.available_width, style.col_right,
                     );
                     let rel_tab = tab_pos - style.line_x_offset;
                     match tab_type {
@@ -583,7 +589,7 @@ impl TextMeasurer for WasmTextMeasurer {
                     let abs_x = style.line_x_offset + x;
                     let (tab_pos, tab_type, _) = find_next_tab_stop(
                         abs_x, &style.tab_stops, tab_w,
-                        style.auto_tab_right, style.available_width,
+                        style.auto_tab_right, style.available_width, style.col_right,
                     );
                     let rel_tab = tab_pos - style.line_x_offset;
                     match tab_type {
@@ -642,6 +648,7 @@ pub(crate) fn resolved_to_text_style(styles: &ResolvedStyleSet, char_style_id: u
             tab_stops: Vec::new(),
             auto_tab_right: false,
             available_width: 0.0,
+            col_right: 0.0,
             line_x_offset: 0.0,
             tab_leaders: Vec::new(),
             inline_tabs: Vec::new(),
