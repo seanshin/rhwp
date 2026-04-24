@@ -1113,7 +1113,18 @@ impl LayoutEngine {
                     text_style.line_x_offset = x - col_area.x;
                     let next_w = estimate_text_width(&run.text, &text_style);
                     match tab_type {
-                        1 => x = col_area.x + tab_pos - next_w,
+                        1 => {
+                            // 오른쪽 탭: 선행 공백은 tab_pos 앞 채움으로 취급
+                            // 실제 내용(숫자 등)이 tab_pos에서 시작하도록 선행 공백 폭만 빼기
+                            let trimmed = run.text.trim_start();
+                            let leading_ws = &run.text[..run.text.len() - trimmed.len()];
+                            let leading_ws_w = if leading_ws.is_empty() {
+                                0.0
+                            } else {
+                                estimate_text_width(leading_ws, &text_style)
+                            };
+                            x = col_area.x + tab_pos - leading_ws_w;
+                        }
                         2 => x = col_area.x + tab_pos - next_w / 2.0,
                         _ => {}
                     }
