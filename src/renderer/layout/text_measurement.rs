@@ -296,10 +296,6 @@ impl TextMeasurer for EmbeddedTextMeasurer {
                     match tab_type {
                         1 => { // 오른쪽
                             let seg_w = measure_segment_from(&chars, &cluster_len, i + 1, &char_width);
-                            if tab_type == 1 {
-                                eprintln!("[DEBUG_TAB_POS] RIGHT tab: abs_x={:.2}, tab_pos={:.2}, line_x_offset={:.2}, rel_tab={:.2}, seg_w={:.2}, avail_w={:.2}, result_x={:.2}",
-                                    abs_x, tab_pos, style.line_x_offset, rel_tab, seg_w, style.available_width, (rel_tab - seg_w).max(x));
-                            }
                             x = (rel_tab - seg_w).max(x);
                         }
                         2 => { // 가운데
