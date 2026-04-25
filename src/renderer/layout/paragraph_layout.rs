@@ -9,7 +9,7 @@ use super::super::page_layout::LayoutRect;
 use super::super::height_measurer::MeasuredTable;
 use super::super::composer::{ComposedParagraph, compose_paragraph};
 use super::super::style_resolver::ResolvedStyleSet;
-use super::super::{TextStyle, ShapeStyle, hwpunit_to_px, format_number, NumberFormat as NumFmt, AutoNumberCounter};
+use super::super::{TextStyle, ShapeStyle, TabStop, hwpunit_to_px, format_number, NumberFormat as NumFmt, AutoNumberCounter};
 use super::{LayoutEngine, CellContext};
 use super::text_measurement::{resolved_to_text_style, estimate_text_width, compute_char_positions, extract_tab_leaders_with_extended, find_next_tab_stop};
 use super::border_rendering::create_border_line_nodes;
@@ -24,6 +24,57 @@ pub(crate) fn ensure_min_baseline(raw_baseline: f64, max_font_size: f64) -> f64 
     }
     let min_baseline = max_font_size * 0.8;
     raw_baseline.max(min_baseline)
+}
+
+/// run 이 `\t` 로 끝날 때, 그 마지막 `\t` 가 cross-run 우측/가운데 탭으로 동작해야 하는지 판정한다.
+///
+/// HWP 본문 탭에는 두 가지 정보원이 있다:
+/// - `tab_extended` (inline tab): `ext[2]` 고바이트 = 탭 종류 (1=LEFT, 2=RIGHT, 3=CENTER, 4=DECIMAL)
+/// - `TabDef` (문단 모양의 탭 정의): 절대 위치 + type/fill
+///
+/// inline 이 커버하는 `\t` 는 inline 의 종류가 우선이며, LEFT 이면 cross-run 재배치 없음.
+/// inline 이 비었거나 `\t` 인덱스를 초과하는 경우에만 `find_next_tab_stop` 기반 TabDef 폴백으로 판정한다.
+///
+/// 반환 `Some((tab_pos, tab_type, fill_type))` 은 `pending_right_tab_*` 에 그대로 대입 가능 (tab_type ∈ {1, 2}).
+/// fill_type 은 호출 측에서 리더(점선/실선/파선 등) 가 있는 RIGHT 탭을 단 우측 끝으로 보정하는 용도.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_last_tab_pending(
+    run_text: &str,
+    last_inline_idx: usize,
+    tab_extended: &[[u16; 7]],
+    text_style: &TextStyle,
+    tab_stops: &[TabStop],
+    tab_width: f64,
+    auto_tab_right: bool,
+    available_width: f64,
+) -> Option<(f64, u8, u8)> {
+    // 1) inline_tabs 가 마지막 \t 를 커버하는 경우: ext[2] 고바이트로 종류 판정
+    if last_inline_idx < tab_extended.len() {
+        let inline_type = ((tab_extended[last_inline_idx][2] >> 8) & 0xFF) as u8;
+        match inline_type {
+            // 1=LEFT (explicit), 0=unspecified → cross-run pending 없음 (본 수정의 핵심)
+            0 | 1 => return None,
+            // 2=RIGHT, 3=CENTER → TabDef 기반 위치 계산으로 폴스루
+            2 | 3 => {}
+            // 미지 값 (4=DECIMAL 등) → 보수적으로 LEFT 취급
+            _ => return None,
+        }
+    }
+
+    // 2) inline 이 LEFT 아님 (RIGHT/CENTER) 또는 inline 없음 → TabDef find_next_tab_stop 으로 판정
+    let last_tab_byte = run_text.rfind('\t')?;
+    let text_before = &run_text[..last_tab_byte];
+    let w_before = estimate_text_width(text_before, text_style);
+    let abs_before = text_style.line_x_offset + w_before;
+    let tw = if tab_width > 0.0 { tab_width } else { 48.0 };
+    let (tp, tt, ft) = find_next_tab_stop(
+        abs_before, tab_stops, tw, auto_tab_right, available_width,
+    );
+    if tt == 1 || tt == 2 {
+        Some((tp, tt, ft))
+    } else {
+        None
+    }
 }
 
 impl LayoutEngine {
@@ -766,7 +817,10 @@ impl LayoutEngine {
             let line_id = tree.next_id();
             let mut line_node = RenderNode::new(
                 line_id,
-                RenderNodeType::TextLine(TextLineNode::with_para(line_height, baseline, section_index, para_index)),
+                RenderNodeType::TextLine({
+                    let vpos = para.and_then(|p| p.line_segs.get(line_idx)).map(|ls| ls.vertical_pos).unwrap_or(0);
+                    TextLineNode::with_para_vpos(line_height, baseline, section_index, para_index, line_idx as u32, vpos)
+                }),
                 BoundingBox::new(
                     col_area.x + effective_margin_left,
                     text_y,
@@ -779,16 +833,16 @@ impl LayoutEngine {
             // 번호/글머리표 마커: 모든 줄에서 마커 폭만큼 가용폭 차감 (행잉 인덴트)
             let num_offset = if numbering_width > 0.0 { numbering_width } else { 0.0 };
             let available_width = col_area.width - effective_margin_left - margin_right - inline_offset - num_offset;
-            // 오른쪽 탭(type=1) 클램핑 기준: 컬럼 우측 경계 (좌여백 포함, 문단 상대값이 아님)
-            let col_right = available_width + effective_margin_left;
 
 
             // 텍스트 정렬을 위한 전체 줄 폭 계산 (자연 폭, 추가 간격 미포함)
             // treat_as_char 이미지 폭도 포함하여 정확한 폭 산출
             let mut est_x = effective_margin_left + inline_offset;
             let est_x_start = est_x;
-            let mut pending_right_tab_est: Option<(f64, u8)> = None;
+            let mut pending_right_tab_est: Option<(f64, u8, u8)> = None;
             let mut run_char_pos_est = comp_line.char_start;
+            // cross-run 탭 감지용 inline_tabs(composed.tab_extended) 커서 — Task #290
+            let mut inline_tab_cursor_est: usize = 0;
             for run in &comp_line.runs {
                 let run_char_count_est = if run.char_overlap.is_some() {
                     let chars: Vec<char> = run.text.chars().collect();
@@ -807,15 +861,36 @@ impl LayoutEngine {
                 ts.auto_tab_right = auto_tab_right;
                 ts.available_width = available_width;
                 ts.inline_tabs = composed.tab_extended.clone();
-                ts.col_right = col_right;
                 // 교차 run 오른쪽/가운데 탭: 이 run의 시작 위치를 역방향으로 조정
-                if let Some((tab_pos, tab_type)) = pending_right_tab_est.take() {
-                    ts.line_x_offset = est_x;
-                    let run_w = estimate_text_width(&run.text, &ts);
-                    match tab_type {
-                        1 => est_x = tab_pos - run_w,
-                        2 => est_x = tab_pos - run_w / 2.0,
-                        _ => {}
+                if let Some((tab_pos, tab_type, fill_type)) = pending_right_tab_est.take() {
+                    // [Task #279] 공백만 있는 run 은 right/center tab 정렬 단위가 아니다.
+                    // (장제목 케이스: " " 단독 run → carry-over)
+                    if (tab_type == 1 || tab_type == 2) && run.text.trim().is_empty() {
+                        pending_right_tab_est = Some((tab_pos, tab_type, fill_type));
+                    } else {
+                        ts.line_x_offset = est_x;
+                        // [Task #279] 리더(fill_type ≠ 0) 가 있는 RIGHT 탭은 "이 줄 우측 끝까지" 의미.
+                        // 셀 안 문단에서는 col_area 가 이미 cell padding 적용된 inner_area 이므로
+                        // `effective_margin_left + available_width` 가 inner 우측 끝.
+                        let effective_pos = if tab_type == 1 && fill_type != 0 {
+                            effective_margin_left + available_width
+                        } else {
+                            tab_pos
+                        };
+                        match tab_type {
+                            1 => {
+                                // [Task #279] 전체 run 폭 기준 — 선행 공백이 있는 경우 (예: " 16")
+                                // run 시작 x 가 좌측으로 가서 시각적으로 페이지번호 right edge 가
+                                // effective_pos 에 정렬되도록.
+                                let run_w = estimate_text_width(&run.text, &ts);
+                                est_x = effective_pos - run_w;
+                            }
+                            2 => {
+                                let run_w = estimate_text_width(&run.text, &ts);
+                                est_x = effective_pos - run_w / 2.0;
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 // 글자겹침 run: PUA 다자리 숫자는 1글자 폭, 그 외는 font_size * char_count
@@ -829,6 +904,7 @@ impl LayoutEngine {
                     };
                     est_x += w;
                     run_char_pos_est = run_char_end_est;
+                    inline_tab_cursor_est += run.text.chars().filter(|c| *c == '\t').count();
                     continue;
                 }
                 // treat_as_char 분기점 처리: run 내 tac 위치에서 이미지 폭 삽입
@@ -854,19 +930,25 @@ impl LayoutEngine {
                 if !remaining_est.is_empty() {
                     est_x += estimate_text_width(&remaining_est, &ts);
                 }
-                // run이 \t로 끝나면 다음 run에 오른쪽/가운데 탭 조정 필요
-                if run.text.ends_with('\t') {
-                    if let Some(last_tab_byte) = run.text.rfind('\t') {
-                        let text_before_tab = &run.text[..last_tab_byte];
-                        let w_before = estimate_text_width(text_before_tab, &ts);
-                        let abs_before = ts.line_x_offset + w_before;
-                        let tw = if tab_width > 0.0 { tab_width } else { 48.0 };
-                        let (tp, tt, _) = find_next_tab_stop(
-                            abs_before, &tab_stops, tw, auto_tab_right, available_width, col_right,
+                // run이 \t로 끝나면 다음 run에 오른쪽/가운데 탭 조정 필요 — Task #290:
+                // inline_tabs(composed.tab_extended) 가 LEFT 를 명시하면 cross-run pending 을 설정하지 않는다.
+                // [Task #279] trailing 공백 (\t 뒤에 따라오는 ' ') 도 허용 — 목차 소제목의
+                // 들여쓰기 문단에서 한컴이 "\t " 형태로 저장하는 케이스가 있음.
+                let trimmed_end = run.text.trim_end_matches(|c: char| c == ' ' || c == '\u{2007}');
+                if trimmed_end.ends_with('\t') {
+                    let run_tab_count = run.text.chars().filter(|c| *c == '\t').count();
+                    if run_tab_count > 0 {
+                        let last_inline_idx = inline_tab_cursor_est + run_tab_count - 1;
+                        pending_right_tab_est = resolve_last_tab_pending(
+                            &run.text,
+                            last_inline_idx,
+                            &composed.tab_extended,
+                            &ts,
+                            &tab_stops,
+                            tab_width,
+                            auto_tab_right,
+                            available_width,
                         );
-                        if tt == 1 || tt == 2 {
-                            pending_right_tab_est = Some((tp, tt));
-                        }
                     }
                 }
                 // 각주 마커 폭: run 내에 각주가 있으면 마커 위첨자 폭 추가
@@ -880,6 +962,7 @@ impl LayoutEngine {
                     }
                 }
                 run_char_pos_est = run_char_end_est;
+                inline_tab_cursor_est += run.text.chars().filter(|c| *c == '\t').count();
             }
             // 교차 run 탭으로 인한 역방향 이동이 있을 수 있으므로
             // est_x 차이로 정확한 점유 폭을 계산
@@ -1136,11 +1219,13 @@ impl LayoutEngine {
             let fn_positions: &[(usize, u16)] = &composed.footnote_positions;
             let mut fn_marker_inserted = vec![false; fn_positions.len()];
 
-            let mut pending_right_tab_render: Option<(f64, u8)> = None;
+            let mut pending_right_tab_render: Option<(f64, u8, u8)> = None;
             let is_last_run_of_line = |idx: usize| idx == comp_line.runs.len() - 1;
             let mut run_char_pos = comp_line.char_start;
             // 이미 삽입한 도형 마커 추적
             let mut shape_marker_inserted = vec![false; shape_markers.len()];
+            // cross-run 탭 감지용 inline_tabs(composed.tab_extended) 커서 — Task #290
+            let mut inline_tab_cursor_render: usize = 0;
             for (run_idx, run) in comp_line.runs.iter().enumerate() {
                 // 조판부호: 이 run 시작 위치 이전의 도형 마커를 먼저 삽입
                 for (smi, (spos, stext)) in shape_markers.iter().enumerate() {
@@ -1174,33 +1259,77 @@ impl LayoutEngine {
                 text_style.tab_stops = tab_stops.clone();
                 text_style.auto_tab_right = auto_tab_right;
                 text_style.available_width = available_width;
-                text_style.col_right = col_right;
                 text_style.inline_tabs = composed.tab_extended.clone();
                 // 교차 run 오른쪽/가운데 탭: 이전 run이 \t로 끝났고
                 // 해당 탭이 오른쪽/가운데 탭이면 이 run을 역방향으로 이동
-                if let Some((tab_pos, tab_type)) = pending_right_tab_render.take() {
+                if let Some((tab_pos, tab_type, fill_type)) = pending_right_tab_render.take() {
+                    // [Task #279] 공백만 있는 run 은 right/center tab 정렬 단위가 아니다.
+                    // 한컴 목차의 장제목 케이스: "Ⅰ. 사업개요\t" + " " + "3" 으로 run 분리되며,
+                    // " " run 에 right tab 을 적용하면 페이지번호 "3" 이 effective_pos 보다
+                    // 공백 폭만큼 우측으로 밀려 소제목 정렬과 어긋난다. 공백 only run 은 정렬을
+                    // 건너뛰고 pending 을 다음 의미있는 run 으로 carry-over.
+                    if (tab_type == 1 || tab_type == 2) && run.text.trim().is_empty() {
+                        // carry-over: 공백 run 은 정렬 단위가 아님. leader 보정도 다음 run 시점으로
+                        // 위임 (그 시점의 leader-bearing TextRun 검색이 \t 가진 진짜 leader run 을 찾음).
+                        pending_right_tab_render = Some((tab_pos, tab_type, fill_type));
+                    } else {
                     text_style.line_x_offset = x - col_area.x;
-                    let next_w = estimate_text_width(&run.text, &text_style);
+                    // [Task #279] 리더(fill_type ≠ 0) 가 있는 RIGHT 탭은 "이 줄 우측 끝까지" 의미.
+                    // 한컴은 TabDef.position 을 절대 좌표로 신뢰하지 않고 리더 도트의 시멘틱
+                    // (= 단/셀 콘텐츠 영역 우측 끝까지 채움) 으로 재해석한다.
+                    // 셀 안 문단에서는 col_area 가 이미 cell padding 적용된 inner_area 이므로
+                    // `effective_margin_left + available_width` 가 inner 우측 끝.
+                    // tab_pos (HWP 저장값) 이 inner 우측 끝을 초과하면 셀 padding_right 침범이므로 강제 클램핑.
+                    let effective_pos = if tab_type == 1 && fill_type != 0 {
+                        effective_margin_left + available_width
+                    } else {
+                        tab_pos
+                    };
                     match tab_type {
                         1 => {
-                            // 오른쪽 탭: 현재 run + 이후 모든 run의 총 폭 합산
-                            // right edge = tab_pos_abs 가 되도록 역방향 이동
-                            let mut total_w = next_w;
-                            for fr in &comp_line.runs[(run_idx + 1)..] {
-                                let mut fts = resolved_to_text_style(
-                                    styles, fr.char_style_id, fr.lang_index,
-                                );
-                                fts.default_tab_width = tab_width;
-                                fts.tab_stops = tab_stops.clone();
-                                fts.auto_tab_right = auto_tab_right;
-                                fts.available_width = available_width;
-                                total_w += estimate_text_width(&fr.text, &fts);
-                            }
-                            x = col_area.x + tab_pos - total_w;
+                            // [Task #279] 전체 run 폭 기준 — 선행 공백이 있는 경우 (예: " 16")
+                            // run 시작 x 가 좌측으로 가서 시각적으로 페이지번호 right edge 가
+                            // effective_pos 에 정렬되도록.
+                            let next_w = estimate_text_width(&run.text, &text_style);
+                            x = col_area.x + effective_pos - next_w;
                         }
-                        2 => x = col_area.x + tab_pos - next_w / 2.0,
+                        2 => {
+                            let next_w = estimate_text_width(&run.text, &text_style);
+                            x = col_area.x + effective_pos - next_w / 2.0;
+                        }
                         _ => {}
                     }
+                    // [Task #279] 직전 run 의 leader 끝 위치를 페이지번호 시작 x 직전까지 단축.
+                    // 한컴은 페이지번호 폭에 따라 리더 길이가 달라지도록 조판한다 (한 자리 vs
+                    // 두 자리 페이지번호의 leader 끝점이 다름). cross-run RIGHT 정렬 후
+                    // tab_leaders 가 있는 직전 TextRun 을 거슬러 찾아 마지막 항목 end_x 를 보정.
+                    // 공백 only run carry-over 케이스 대비 — 가장 마지막 TextRun 이 공백 run 이고
+                    // leader 가 없으면 그 이전 (\t 가진 leader-bearing) TextRun 을 찾음.
+                    if let Some(prev_run_node) = line_node.children.iter_mut().rev()
+                        .find(|n| {
+                            if let RenderNodeType::TextRun(tr) = &n.node_type {
+                                !tr.style.tab_leaders.is_empty()
+                            } else {
+                                false
+                            }
+                        })
+                    {
+                        let prev_bbox_x = prev_run_node.bbox.x;
+                        if let RenderNodeType::TextRun(prev_text_run) = &mut prev_run_node.node_type {
+                            if let Some(last_leader) = prev_text_run.style.tab_leaders.last_mut() {
+                                let space_gap = if text_style.font_size > 0.0 {
+                                    text_style.font_size * 0.25
+                                } else {
+                                    3.0
+                                };
+                                let new_end_x = (x - prev_bbox_x - space_gap).max(last_leader.start_x);
+                                if new_end_x < last_leader.end_x {
+                                    last_leader.end_x = new_end_x;
+                                }
+                            }
+                        }
+                    }
+                    } // end else (non-blank run)
                 }
                 text_style.line_x_offset = x - col_area.x;
                 text_style.extra_word_spacing = extra_word_sp;
@@ -1227,20 +1356,25 @@ impl LayoutEngine {
                     text_style.inline_tabs = saved_inline_tabs;
                     text_style.tab_leaders = extract_tab_leaders_with_extended(&run.text, &positions, &text_style, &composed.tab_extended);
                 }
-                // 교차 run 오른쪽/가운데 탭 감지:
-                // run이 \t로 끝나면 해당 탭의 종류를 확인하여 다음 run 조정에 사용
-                if has_tabs && run.text.trim_end_matches(' ').ends_with('\t') {
-                    if let Some(last_tab_pos) = run.text.rfind('\t') {
-                        let text_before_tab = &run.text[..last_tab_pos];
-                        let w_before = estimate_text_width(text_before_tab, &text_style);
-                        let abs_before = text_style.line_x_offset + w_before;
-                        let tw = if tab_width > 0.0 { tab_width } else { 48.0 };
-                        let (tp, tt, _) = find_next_tab_stop(
-                            abs_before, &tab_stops, tw, auto_tab_right, available_width, col_right,
+                // 교차 run 오른쪽/가운데 탭 감지 — Task #290:
+                // inline_tabs(composed.tab_extended) 가 LEFT 를 명시하면 cross-run pending 을 설정하지 않는다.
+                // [Task #279] trailing 공백 (\t 뒤에 따라오는 ' ') 도 허용 — 목차 소제목의
+                // 들여쓰기 문단에서 한컴이 "\t " 형태로 저장하는 케이스가 있음.
+                let trimmed_end_r = run.text.trim_end_matches(|c: char| c == ' ' || c == '\u{2007}');
+                if has_tabs && trimmed_end_r.ends_with('\t') {
+                    let run_tab_count = run.text.chars().filter(|c| *c == '\t').count();
+                    if run_tab_count > 0 {
+                        let last_inline_idx = inline_tab_cursor_render + run_tab_count - 1;
+                        pending_right_tab_render = resolve_last_tab_pending(
+                            &run.text,
+                            last_inline_idx,
+                            &composed.tab_extended,
+                            &text_style,
+                            &tab_stops,
+                            tab_width,
+                            auto_tab_right,
+                            available_width,
                         );
-                        if tt == 1 || tt == 2 {
-                            pending_right_tab_render = Some((tp, tt));
-                        }
                     }
                 }
                 let run_char_count = if run.char_overlap.is_some() {
@@ -1765,6 +1899,7 @@ impl LayoutEngine {
 
                 char_offset += run_char_count;
                 run_char_pos = run_char_end;
+                inline_tab_cursor_render += run.text.chars().filter(|c| *c == '\t').count();
                 char_x_map.push((char_offset, x));
             }
 
@@ -1938,6 +2073,69 @@ impl LayoutEngine {
                     BoundingBox::new(x_start, y, available_width, line_height),
                 );
                 line_node.children.push(run_node);
+            }
+
+            // [Task #287] 빈 runs 줄의 TAC 수식 인라인 처리
+            // 큰 디스플레이 수식이 자체 LINE_SEG 를 가질 때 comp_line.runs 가 비어있는데,
+            // run 루프가 돌지 않아 수식이 인라인 경로로 렌더되지 않고 shape_layout display
+            // 경로로 떨어져 col_area.y 에 고정되던 문제를 해결한다.
+            if comp_line.runs.is_empty() && !tac_offsets_px.is_empty() {
+                let line_start_char = comp_line.char_start;
+                let line_end_char = composed.lines.get(line_idx + 1)
+                    .map(|l| l.char_start)
+                    .unwrap_or(usize::MAX);
+                let mut inline_x = col_area.x + effective_margin_left;
+                for &(tac_pos, tac_w, tac_ci) in &tac_offsets_px {
+                    if tac_pos < line_start_char || tac_pos >= line_end_char {
+                        continue;
+                    }
+                    if let Some(p) = para {
+                        if let Some(Control::Equation(eq)) = p.controls.get(tac_ci) {
+                            let tokens = crate::renderer::equation::tokenizer::tokenize(&eq.script);
+                            let ast = crate::renderer::equation::parser::EqParser::new(tokens).parse();
+                            let font_size_px = hwpunit_to_px(eq.font_size as i32, self.dpi);
+                            let layout_box = crate::renderer::equation::layout::EqLayout::new(font_size_px).layout(&ast);
+                            let color_str = crate::renderer::equation::svg_render::eq_color_to_svg(eq.color);
+                            let svg_content = crate::renderer::equation::svg_render::render_equation_svg(
+                                &layout_box, &color_str, font_size_px,
+                            );
+                            let eq_h = layout_box.height;
+                            let eq_y = (y + baseline - layout_box.baseline).max(y);
+                            let (eq_cell_idx, eq_cell_para_idx) = if let Some(ref ctx) = cell_ctx {
+                                (Some(ctx.path[0].cell_index), Some(ctx.path[0].cell_para_index))
+                            } else {
+                                (None, None)
+                            };
+                            let eq_node = RenderNode::new(
+                                tree.next_id(),
+                                RenderNodeType::Equation(crate::renderer::render_tree::EquationNode {
+                                    svg_content,
+                                    layout_box,
+                                    color_str,
+                                    color: eq.color,
+                                    font_size: font_size_px,
+                                    section_index: Some(section_index),
+                                    para_index: if let Some(ref ctx) = cell_ctx {
+                                        Some(ctx.parent_para_index)
+                                    } else {
+                                        Some(para_index)
+                                    },
+                                    control_index: if let Some(ref ctx) = cell_ctx {
+                                        Some(ctx.path[0].control_index)
+                                    } else {
+                                        Some(tac_ci)
+                                    },
+                                    cell_index: eq_cell_idx,
+                                    cell_para_index: eq_cell_para_idx,
+                                }),
+                                BoundingBox::new(inline_x, eq_y, tac_w, eq_h),
+                            );
+                            line_node.children.push(eq_node);
+                            tree.set_inline_shape_position(section_index, para_index, tac_ci, inline_x, eq_y);
+                            inline_x += tac_w;
+                        }
+                    }
+                }
             }
 
             // ClickHere 필드 처리: 안내문 + 조판부호 마커 ([누름틀 시작]/[누름틀 끝])

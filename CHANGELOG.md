@@ -2,16 +2,14 @@
 
 이 프로젝트의 주요 변경 사항을 기록합니다.
 
-## [0.7.3] — 2026-04-22
-
-> Visual Diff 기반 호환성 개선 — 한컴 렌더링과 페이지별 비교·수정
+## [Unreleased]
 
 ### 수정
-- **PUA 심볼 문자 렌더링**: Wingdings 등 심볼 폰트의 PUA 문자(U+F000~F0FF)를 유니코드 표준 문자로 변환하여 SVG/Canvas에서 정상 표시 (⇩⇧⇦⇨ 등 화살표, ●■◆ 등 도형, ✔☑ 등 체크마크)
-- **문단 테두리/배경 여백 반영**: border_fill 렌더링 시 문단의 margin_left/margin_right를 반영하여 테두리 박스 위치·폭이 텍스트 영역과 정확히 일치
-
-### 내부 개선
-- Visual Diff 파이프라인 구축 (한컴 PDF ↔ rhwp SVG 페이지별 픽셀 비교)
+- **목차 리더 도트 + 페이지번호 우측 탭 정렬** (#279)
+  — 분석·구현 by [@seanshin](https://github.com/seanshin)
+  - `fill_type=3` 점선 리더를 round cap 원형 점으로 표현 (한컴 동등)
+  - `find_next_tab_stop` RIGHT 탭 클램핑 제외 — 들여쓰기 문단의 페이지번호 정렬 보정
+  - 메인테이너 추가 보강: 셀 padding 인지 leader 시멘틱, 페이지번호 폭별 leader 길이 차등화, 공백 only run carry-over
 
 ## [0.6.0] — 2026-04-04
 

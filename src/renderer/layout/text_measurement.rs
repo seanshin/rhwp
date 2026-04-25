@@ -54,30 +54,37 @@ fn style_params(style: &TextStyle) -> (f64, f64, f64) {
     (font_size, ratio, tab_w)
 }
 
+/// inline_tabs ext[2] 에서 탭 종류를 추출.
+///
+/// HWP `tab_extended` 포맷 (PR #292 / Task #290 실증):
+/// - high byte = 탭 종류 enum+1 (1=LEFT, 2=RIGHT, 3=CENTER, 4=DECIMAL)
+/// - low  byte = fill_type (TabDef.fill 과 동일)
+///
+/// 기존 코드는 `ext[2]` 전체 u16 을 탭 종류로 해석하여 실제 HWP 값(최소 256)과
+/// 매칭 실패. 이 헬퍼로 고바이트만 추출해 0~4 값으로 정규화.
+#[inline]
+pub(super) fn inline_tab_type(ext: &[u16; 7]) -> u8 {
+    ((ext[2] >> 8) & 0xFF) as u8
+}
+
 /// 현재 절대 위치에서 다음 탭 정지를 찾는다.
 ///
 /// Returns (position, tab_type, fill_type).
 /// 커스텀 탭이 없으면 기본 등간격 탭을 사용한다.
-///
-/// - `available_width`: 단 너비 - 좌여백 - 우여백 (문단 상대값). left/center 탭 클램핑에 사용.
-/// - `col_right`: 단 우측 경계 (컬럼 기준 절대값 ≈ available_width + effective_margin_left).
-///   right 탭(type=1) 클램핑에 사용. 들여쓰기가 있어도 동일한 우측 정렬 위치를 유지한다.
 pub(crate) fn find_next_tab_stop(
     abs_x: f64,
     tab_stops: &[TabStop],
     default_tab_width: f64,
     auto_tab_right: bool,
     available_width: f64,
-    col_right: f64,  // 0이면 available_width로 fallback
 ) -> (f64, u8, u8) {
-    let col_right = if col_right > 0.0 { col_right } else { available_width };
     // 커스텀 탭 정지에서 현재 위치 뒤의 첫 번째 검색
     for ts in tab_stops {
-        // type=1(오른쪽) 탭: 컬럼 우측 경계(col_right)로 클램핑 — 들여쓰기 문단에서도 동일 위치
-        // type=0(왼쪽)/2(가운데) 탭: 문단 가용폭(available_width)으로 클램핑
-        let clamp = if ts.tab_type == 1 { col_right } else { available_width };
-        let pos = if clamp > 0.0 && ts.position > clamp {
-            clamp
+        // type=1(오른쪽) 탭은 단 기준 절대 위치이므로 available_width 클램핑 제외.
+        // 들여쓰기(left_margin)가 있는 문단에서도 오른쪽 탭이 동일 위치에 정렬되도록 한다.
+        // type=0(왼쪽)/2(가운데) 탭은 종전대로 클램핑하여 텍스트 영역 밖으로 넘어가지 않게 한다.
+        let pos = if ts.tab_type != 1 && ts.position > available_width && available_width > 0.0 {
+            available_width
         } else {
             ts.position
         };
@@ -141,7 +148,7 @@ pub fn extract_tab_leaders_with_extended(
                 let abs_before = style.line_x_offset + before_x;
                 let (_, _, ft) = find_next_tab_stop(
                     abs_before, &style.tab_stops, tab_w,
-                    style.auto_tab_right, style.available_width, style.col_right,
+                    style.auto_tab_right, style.available_width,
                 );
                 ft
             } else {
@@ -219,6 +226,10 @@ impl TextMeasurer for EmbeddedTextMeasurer {
             if cluster_len[i] == 0 { continue; }
             if c == '\t' {
                 // 인라인 탭 (HWP tab_extended / HWPX 인라인 탭)
+                // NOTE: 네이티브 경로는 `tab_type = ext[2]` 전체 u16 해석을 유지.
+                // 기존 golden SVG (issue-147, issue-267) 가 이 "우연한 LEFT 폴백" 동작에
+                // 의존하고 있어, 이를 바꾸면 회귀 발생. WASM 경로만 inline_tab_type 사용.
+                // 네이티브 측 일관성 복원은 별도 이슈로 추적 (Task #296 범위 외).
                 if tab_char_idx < style.inline_tabs.len() {
                     let ext = &style.inline_tabs[tab_char_idx];
                     let tab_width_px = ext[0] as f64 * 96.0 / 7200.0;
@@ -242,7 +253,7 @@ impl TextMeasurer for EmbeddedTextMeasurer {
                     let abs_x = style.line_x_offset + total;
                     let (tab_pos, tab_type, _) = find_next_tab_stop(
                         abs_x, &style.tab_stops, tab_w,
-                        style.auto_tab_right, style.available_width, style.col_right,
+                        style.auto_tab_right, style.available_width,
                     );
                     let rel_tab = tab_pos - style.line_x_offset;
                     match tab_type {
@@ -322,6 +333,8 @@ impl TextMeasurer for EmbeddedTextMeasurer {
             }
             if c == '\t' {
                 // HWPX 인라인 탭: inline_tabs에서 width/type 사용
+                // 네이티브 경로의 ext[2] 인코딩: (tab_type << 8) | fill_type.
+                // 상위 바이트가 tab_type (1=LEFT, 2=RIGHT, 3=CENTER, 4=DECIMAL).
                 if tab_char_idx < style.inline_tabs.len() {
                     let ext = &style.inline_tabs[tab_char_idx];
                     let tab_width_px = ext[0] as f64 * 96.0 / 7200.0;
@@ -329,7 +342,8 @@ impl TextMeasurer for EmbeddedTextMeasurer {
                     let tab_target = x + tab_width_px;
                     match tab_type {
                         1 => { // 오른쪽
-                            let seg_w = measure_segment_from(&chars, &cluster_len, i + 1, &char_width);
+                            let seg_start = { let mut s = i + 1; while s < chars.len() && chars[s] == ' ' && cluster_len[s] != 0 { s += 1; } s };
+                            let seg_w = measure_segment_from(&chars, &cluster_len, seg_start, &char_width);
                             x = (tab_target - seg_w).max(x);
                         }
                         2 => { // 가운데
@@ -345,12 +359,13 @@ impl TextMeasurer for EmbeddedTextMeasurer {
                     let abs_x = style.line_x_offset + x;
                     let (tab_pos, tab_type, _) = find_next_tab_stop(
                         abs_x, &style.tab_stops, tab_w,
-                        style.auto_tab_right, style.available_width, style.col_right,
+                        style.auto_tab_right, style.available_width,
                     );
                     let rel_tab = tab_pos - style.line_x_offset;
                     match tab_type {
                         1 => { // 오른쪽
-                            let seg_w = measure_segment_from(&chars, &cluster_len, i + 1, &char_width);
+                            let seg_start = { let mut s = i + 1; while s < chars.len() && chars[s] == ' ' && cluster_len[s] != 0 { s += 1; } s };
+                            let seg_w = measure_segment_from(&chars, &cluster_len, seg_start, &char_width);
                             x = (rel_tab - seg_w).max(x);
                         }
                         2 => { // 가운데
@@ -564,15 +579,37 @@ impl TextMeasurer for WasmTextMeasurer {
         };
 
         let mut total = 0.0;
+        let mut tab_char_idx = 0usize; // [Task #296] inline_tabs 인덱스
         for i in 0..char_count {
             let c = chars[i];
             if cluster_len[i] == 0 { continue; }
             if c == '\t' {
-                if has_custom_tabs {
+                // [Task #296] 인라인 탭 (HWP tab_extended / HWPX 인라인 탭) 을
+                // WASM Canvas 경로에서도 존중. 네이티브 EmbeddedTextMeasurer 와 동일 구조.
+                if tab_char_idx < style.inline_tabs.len() {
+                    let ext = &style.inline_tabs[tab_char_idx];
+                    let tab_width_px = ext[0] as f64 * 96.0 / 7200.0;
+                    let tab_type = inline_tab_type(ext);
+                    let tab_target = total + tab_width_px;
+                    match tab_type {
+                        2 => { // RIGHT
+                            let seg_w = measure_segment_from(&chars, &cluster_len, i + 1, &char_width);
+                            total = (tab_target - seg_w).max(total);
+                        }
+                        3 => { // CENTER
+                            let seg_w = measure_segment_from(&chars, &cluster_len, i + 1, &char_width);
+                            total = (tab_target - seg_w / 2.0).max(total);
+                        }
+                        _ => { // LEFT(0/1), DECIMAL(4), 기타
+                            total = tab_target.max(total);
+                        }
+                    }
+                    tab_char_idx += 1;
+                } else if has_custom_tabs {
                     let abs_x = style.line_x_offset + total;
                     let (tab_pos, tab_type, _) = find_next_tab_stop(
                         abs_x, &style.tab_stops, tab_w,
-                        style.auto_tab_right, style.available_width, style.col_right,
+                        style.auto_tab_right, style.available_width,
                     );
                     let rel_tab = tab_pos - style.line_x_offset;
                     match tab_type {
@@ -588,11 +625,13 @@ impl TextMeasurer for WasmTextMeasurer {
                             total = rel_tab.max(total);
                         }
                     }
+                    tab_char_idx += 1;
                 } else {
                     // 기본 등간격 탭: 라인 절대 위치(line_x_offset + total) 기준으로 계산
                     let abs_x = style.line_x_offset + total;
                     let next_abs = ((abs_x / tab_w).floor() + 1.0) * tab_w;
                     total = (next_abs - style.line_x_offset).max(total);
+                    tab_char_idx += 1;
                 }
                 continue;
             }
@@ -641,6 +680,7 @@ impl TextMeasurer for WasmTextMeasurer {
             w
         };
 
+        let mut tab_char_idx = 0usize; // [Task #296] inline_tabs 인덱스
         for i in 0..char_count {
             let c = chars[i];
             if cluster_len[i] == 0 {
@@ -648,16 +688,39 @@ impl TextMeasurer for WasmTextMeasurer {
                 continue;
             }
             if c == '\t' {
-                if has_custom_tabs {
+                // [Task #296] 인라인 탭 (HWP tab_extended / HWPX 인라인 탭) 을
+                // WASM Canvas 경로에서도 존중. 네이티브 EmbeddedTextMeasurer 와 동일 구조.
+                if tab_char_idx < style.inline_tabs.len() {
+                    let ext = &style.inline_tabs[tab_char_idx];
+                    let tab_width_px = ext[0] as f64 * 96.0 / 7200.0;
+                    let tab_type = inline_tab_type(ext);
+                    let tab_target = x + tab_width_px;
+                    match tab_type {
+                        2 => { // RIGHT
+                            let seg_start = { let mut s = i + 1; while s < chars.len() && chars[s] == ' ' && cluster_len[s] != 0 { s += 1; } s };
+                            let seg_w = measure_segment_from(&chars, &cluster_len, seg_start, &char_width);
+                            x = (tab_target - seg_w).max(x);
+                        }
+                        3 => { // CENTER
+                            let seg_w = measure_segment_from(&chars, &cluster_len, i + 1, &char_width);
+                            x = (tab_target - seg_w / 2.0).max(x);
+                        }
+                        _ => { // LEFT(0/1), DECIMAL(4), 기타
+                            x = tab_target.max(x);
+                        }
+                    }
+                    tab_char_idx += 1;
+                } else if has_custom_tabs {
                     let abs_x = style.line_x_offset + x;
                     let (tab_pos, tab_type, _) = find_next_tab_stop(
                         abs_x, &style.tab_stops, tab_w,
-                        style.auto_tab_right, style.available_width, style.col_right,
+                        style.auto_tab_right, style.available_width,
                     );
                     let rel_tab = tab_pos - style.line_x_offset;
                     match tab_type {
                         1 => {
-                            let seg_w = measure_segment_from(&chars, &cluster_len, i + 1, &char_width);
+                            let seg_start = { let mut s = i + 1; while s < chars.len() && chars[s] == ' ' && cluster_len[s] != 0 { s += 1; } s };
+                            let seg_w = measure_segment_from(&chars, &cluster_len, seg_start, &char_width);
                             x = (rel_tab - seg_w).max(x);
                         }
                         2 => {
@@ -668,11 +731,13 @@ impl TextMeasurer for WasmTextMeasurer {
                             x = rel_tab.max(x);
                         }
                     }
+                    tab_char_idx += 1;
                 } else {
                     // 기본 등간격 탭: 라인 절대 위치(line_x_offset + x) 기준으로 계산
                     let abs_x = style.line_x_offset + x;
                     let next_abs = ((abs_x / tab_w).floor() + 1.0) * tab_w;
                     x = (next_abs - style.line_x_offset).max(x);
+                    tab_char_idx += 1;
                 }
                 positions.push(x);
                 continue;
@@ -711,7 +776,6 @@ pub(crate) fn resolved_to_text_style(styles: &ResolvedStyleSet, char_style_id: u
             tab_stops: Vec::new(),
             auto_tab_right: false,
             available_width: 0.0,
-            col_right: 0.0,
             line_x_offset: 0.0,
             tab_leaders: Vec::new(),
             inline_tabs: Vec::new(),

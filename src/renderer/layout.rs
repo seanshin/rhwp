@@ -742,6 +742,10 @@ impl LayoutEngine {
         page_number: u32,
     ) {
         if let Some(mp) = active_master_page {
+            // 영역 0×0 바탕쪽은 MEMO 컨트롤 오분류 방어용 가드 — 렌더링 skip
+            if mp.text_width == 0 && mp.text_height == 0 {
+                return;
+            }
             self.current_page_number.set(page_number);
             if !mp.paragraphs.is_empty() {
                 let mp_id = tree.next_id();
@@ -1445,10 +1449,30 @@ impl LayoutEngine {
             // 표/Shape 처리 후 vpos 기준점 무효화
             // 표/Shape의 LINE_SEG lh는 개체 높이를 포함하여 실제 렌더링 높이와 다르므로
             // vpos 누적이 순차 y_offset과 drift를 일으킴 → 기준점 재산출 필요
-            // TAC/비-TAC 모두 해당 (비-TAC 표도 vpos에 표 높이가 포함됨)
+            // 예외: Para-relative float 표(vert=Para, TopAndBottom, non-TAC)는
+            // 앵커 문단에 attach되므로 후속 문단의 vpos 교정 기준점을 초기화하면 안 됨.
+            // 초기화하면 한컴이 Para-float 기준으로 기록한 후속 문단 vpos가 잘못된
+            // lazy_base로 교정되어 앵커 y가 상승 → body_bottom clamp → LAYOUT_OVERFLOW.
             let is_table_or_shape = matches!(item,
                 PageItem::Table { .. } | PageItem::PartialTable { .. } | PageItem::Shape { .. });
-            if was_tac || is_table_or_shape {
+            let is_para_float_table = if let PageItem::Table { para_index, control_index } = item {
+                paragraphs
+                    .get(*para_index)
+                    .and_then(|p| p.controls.get(*control_index))
+                    .map(|c| {
+                        matches!(
+                            c,
+                            Control::Table(t)
+                            if !t.common.treat_as_char
+                                && matches!(t.common.text_wrap, crate::model::shape::TextWrap::TopAndBottom)
+                                && matches!(t.common.vert_rel_to, VertRelTo::Para)
+                        )
+                    })
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            if was_tac || (is_table_or_shape && !is_para_float_table) {
                 vpos_page_base = None;
                 vpos_lazy_base = None;
             }
@@ -1740,6 +1764,21 @@ impl LayoutEngine {
             }
             PageItem::PartialParagraph { para_index, start_line, end_line } => {
                 if let Some(para) = paragraphs.get(*para_index) {
+                    // Task #318: wrap=Square 표 호스트 문단의 텍스트는
+                    // layout_wrap_around_paras (자가 wrap 경로) 가 처리한다. PartialParagraph
+                    // 측에서 같은 paragraph 를 layout_partial_paragraph 로 다시 호출하면
+                    // 호스트 텍스트 + 인라인 수식이 중복 emit 됨 (#301 회귀).
+                    // FullParagraph 경로 (`is_wrap_host` 가드, layout.rs:1639) 와 동일한 처리.
+                    let is_wrap_host = para.controls.iter().any(|c| {
+                        if let Control::Table(t) = c {
+                            !t.common.treat_as_char
+                                && matches!(t.common.text_wrap, crate::model::shape::TextWrap::Square)
+                        } else { false }
+                    });
+                    if is_wrap_host {
+                        return (y_offset, false);
+                    }
+
                     // TAC 블록 표 문단의 post-text PP: 텍스트가 공백만이면 건너뜀
                     // (Table PageItem에서 이미 y_offset이 결정됨)
                     if prev_tac_seg_applied {
@@ -1953,7 +1992,17 @@ impl LayoutEngine {
                 let tbl_inline_x = if let Some((ix, _)) = inline_pos {
                     Some(ix)
                 } else if !is_tac && tbl_is_square {
-                    Some(col_area.x)
+                    // Square wrap 표는 halign에 따라 좌/중/우 배치
+                    // (Task #295: halign=Right 표가 좌측에 잘못 배치되는 문제 수정)
+                    let tbl_w = hwpunit_to_px(t.common.width as i32, self.dpi);
+                    let x = match t.common.horz_align {
+                        crate::model::shape::HorzAlign::Right | crate::model::shape::HorzAlign::Outside =>
+                            col_area.x + col_area.width - tbl_w,
+                        crate::model::shape::HorzAlign::Center =>
+                            col_area.x + (col_area.width - tbl_w) / 2.0,
+                        _ => col_area.x,
+                    };
+                    Some(x)
                 } else if is_tac {
                     // TAC 문단에 PageItem::FullParagraph 가 발행되지 않아
                     // paragraph_layout 가 호출되지 않는 케이스(선행 공백만 있는 TAC 표 등):
@@ -1963,13 +2012,37 @@ impl LayoutEngine {
                     let leading = composed.get(para_index)
                         .map(|c| compute_tac_leading_width(c, control_index, styles))
                         .unwrap_or(0.0);
-                    Some(col_area.x + effective_margin + leading)
+                    let base_x = col_area.x + effective_margin + leading;
+                    // [Issue #291] ParaShape align 반영:
+                    // TAC 표가 inline_shape_position 미설정 상태에서 단/문단 좌측에
+                    // 붙어버리는 회귀를 막는다. ParaShape align=Right 인 경우 표를
+                    // 단의 우측 끝 - 표 폭 - margin_right 위치로 이동시켜 한컴과 일치.
+                    // align=Center 도 동일 원리로 처리.
+                    let aligned_x = match para_style.map(|s| s.alignment) {
+                        Some(crate::model::style::Alignment::Right) => {
+                            let tbl_w = hwpunit_to_px(t.common.width as i32, self.dpi);
+                            let avail_right = col_area.x + col_area.width - margin_right;
+                            (avail_right - tbl_w).max(base_x)
+                        }
+                        Some(crate::model::style::Alignment::Center) => {
+                            let tbl_w = hwpunit_to_px(t.common.width as i32, self.dpi);
+                            let center = col_area.x + (col_area.width - tbl_w) / 2.0;
+                            center.max(base_x)
+                        }
+                        _ => base_x,
+                    };
+                    Some(aligned_x)
                 } else {
                     None
                 };
                 // vert=Paper로 body_area 위에 배치되는 표
-                let renders_above_body = !is_tac
-                    && matches!(t.common.vert_rel_to, crate::model::shape::VertRelTo::Paper)
+                // 본문 영역 외부(머리말/꼬리말 자리)에 그려지는 페이지/페이퍼 앵커 TopAndBottom 표는
+                // 본문 흐름의 y_offset을 진행시키지 않고 out-of-flow로 paper_images에 렌더한다.
+                // (Task #295: vert=Page valign=Bottom 푸터 표가 좌단 y_offset을 본문 하단으로
+                //  끌어올려 후속 콘텐츠를 깨뜨리는 문제 수정 — Paper만 다루던 기존 분기를 Page까지 확장)
+                let renders_outside_body = !is_tac
+                    && matches!(t.common.vert_rel_to,
+                        crate::model::shape::VertRelTo::Paper | crate::model::shape::VertRelTo::Page)
                     && matches!(t.common.text_wrap, crate::model::shape::TextWrap::TopAndBottom)
                     && {
                         let tbl_h = hwpunit_to_px(t.common.height as i32, self.dpi);
@@ -1979,9 +2052,11 @@ impl LayoutEngine {
                             crate::model::shape::VertAlign::Center => (layout.page_height - tbl_h) / 2.0 + v_off,
                             crate::model::shape::VertAlign::Bottom | crate::model::shape::VertAlign::Outside => layout.page_height - tbl_h - v_off,
                         };
-                        tbl_y < layout.body_area.y
+                        // 표 상단이 본문 위(머리말)이거나, 표 하단이 본문 아래(꼬리말)에 걸치는 경우
+                        let body_bottom = layout.body_area.y + layout.body_area.height;
+                        tbl_y < layout.body_area.y || tbl_y + tbl_h > body_bottom
                     };
-                if renders_above_body {
+                if renders_outside_body {
                     let tmp_id = tree.next_id();
                     let mut tmp_node = RenderNode::new(
                         tmp_id,
@@ -2051,8 +2126,10 @@ impl LayoutEngine {
                     tac_seg_applied = true;
                 }
                 // ── 어울림 문단 렌더링 ──
+                // 후속 wrap 문단이 없어도 호스트 본문이 표 옆에 wrap되어야 하므로
+                // wrap_around_paras 비어 있어도 호출 (Task #295: pi=27 자가 wrap 누락 수정)
                 let table_is_square = matches!(t.common.text_wrap, crate::model::shape::TextWrap::Square);
-                if !is_tac && table_is_square && !wrap_around_paras.is_empty() {
+                if !is_tac && table_is_square {
                     let wrap_cs = para.line_segs.first().map(|s| s.column_start).unwrap_or(0);
                     let wrap_sw = para.line_segs.first().map(|s| s.segment_width).unwrap_or(0);
                     let wrap_text_x = col_area.x + hwpunit_to_px(wrap_cs, self.dpi);
@@ -2068,20 +2145,25 @@ impl LayoutEngine {
                 }
             }
             // ── 표 아래 간격 ──
-            let is_above_body = if let Some(Control::Table(t)) = para.controls.get(control_index) {
+            // out-of-flow로 그려진 표(머리말/꼬리말 자리)는 본문 흐름 간격을 추가하지 않는다.
+            let is_outside_body = if let Some(Control::Table(t)) = para.controls.get(control_index) {
                 !t.common.treat_as_char
-                    && matches!(t.common.vert_rel_to, crate::model::shape::VertRelTo::Paper)
+                    && matches!(t.common.vert_rel_to,
+                        crate::model::shape::VertRelTo::Paper | crate::model::shape::VertRelTo::Page)
                     && matches!(t.common.text_wrap, crate::model::shape::TextWrap::TopAndBottom)
                     && {
+                        let tbl_h = hwpunit_to_px(t.common.height as i32, self.dpi);
                         let v_off = hwpunit_to_px(t.common.vertical_offset as i32, self.dpi);
                         let tbl_y = match t.common.vert_align {
                             crate::model::shape::VertAlign::Top | crate::model::shape::VertAlign::Inside => v_off,
-                            _ => v_off,
+                            crate::model::shape::VertAlign::Center => (layout.page_height - tbl_h) / 2.0 + v_off,
+                            crate::model::shape::VertAlign::Bottom | crate::model::shape::VertAlign::Outside => layout.page_height - tbl_h - v_off,
                         };
-                        tbl_y < layout.body_area.y
+                        let body_bottom = layout.body_area.y + layout.body_area.height;
+                        tbl_y < layout.body_area.y || tbl_y + tbl_h > body_bottom
                     }
             } else { false };
-            if !tac_seg_applied && !is_above_body {
+            if !tac_seg_applied && !is_outside_body {
                 let comp = composed.get(para_index);
                 let para_style_id = comp.map(|c| c.para_style_id as usize).unwrap_or(para.para_shape_id as usize);
                 if let Some(para_style) = styles.para_styles.get(para_style_id) {
@@ -2466,15 +2548,11 @@ impl LayoutEngine {
                         line.runs.iter().any(|r| r.text.chars().any(|c| c > '\u{001F}' && c != '\u{FFFC}'))
                     });
                     if let Some(start_line) = text_start_line {
-                        // 다중 LINE_SEG 문단: wrap 영역에 해당하는 줄만 렌더링
-                        let text_end_line = if comp.lines.len() > 1 {
-                            // 첫 번째 텍스트 줄만 렌더링 (wrap 영역)
-                            start_line + 1
-                        } else {
-                            comp.lines.iter().rposition(|line| {
-                                line.runs.iter().any(|r| r.text.chars().any(|c| c > '\u{001F}' && c != '\u{FFFC}'))
-                            }).map(|i| i + 1).unwrap_or(comp.lines.len())
-                        };
+                        // 호스트 본문의 모든 텍스트 줄을 wrap 영역에 렌더링
+                        // (Task #295: 자가 wrap host의 다중 줄 누락 수정)
+                        let text_end_line = comp.lines.iter().rposition(|line| {
+                            line.runs.iter().any(|r| r.text.chars().any(|c| c > '\u{001F}' && c != '\u{FFFC}'))
+                        }).map(|i| i + 1).unwrap_or(comp.lines.len());
                         self.layout_partial_paragraph(
                             tree, col_node, table_para, Some(comp), styles,
                             &wrap_area, table_y_start, start_line, text_end_line,

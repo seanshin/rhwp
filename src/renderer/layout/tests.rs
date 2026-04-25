@@ -8,6 +8,7 @@ use super::super::pagination::{PageContent, ColumnContent, PageItem};
 use super::super::page_layout::PageLayoutInfo;
 use super::utils::{expand_numbering_format, numbering_format_to_number_format};
 use super::text_measurement::estimate_text_width;
+use crate::renderer::{TextStyle, TabStop};
 
 fn a4_page_def() -> PageDef {
     PageDef {
@@ -81,6 +82,7 @@ fn test_build_page_with_paragraph() {
             zone_layout: None,
             zone_y_offset: 0.0,
             wrap_around_paras: Vec::new(),
+            used_height: 0.0,
         }],
         active_header: None,
         active_footer: None,
@@ -161,6 +163,7 @@ fn test_layout_with_composed_styles() {
             zone_layout: None,
             zone_y_offset: 0.0,
             wrap_around_paras: Vec::new(),
+            used_height: 0.0,
         }],
         active_header: None,
         active_footer: None,
@@ -255,6 +258,7 @@ fn test_layout_multi_run_x_position() {
             zone_layout: None,
             zone_y_offset: 0.0,
             wrap_around_paras: Vec::new(),
+            used_height: 0.0,
         }],
         active_header: None,
         active_footer: None,
@@ -552,6 +556,7 @@ fn test_layout_table_basic() {
             zone_layout: None,
             zone_y_offset: 0.0,
             wrap_around_paras: Vec::new(),
+            used_height: 0.0,
         }],
         active_header: None,
         active_footer: None,
@@ -635,6 +640,7 @@ fn test_layout_table_cell_positions() {
             zone_layout: None,
             zone_y_offset: 0.0,
             wrap_around_paras: Vec::new(),
+            used_height: 0.0,
         }],
         active_header: None,
         active_footer: None,
@@ -992,4 +998,118 @@ fn test_tac_leading_width_inline_table_partial() {
     let width = super::compute_tac_leading_width(&composed, 0, &styles);
     // "ab" 2 chars, 반각 × font_size/2 = 20*0.5*2 = 20
     assert!((width - 20.0).abs() < 0.5, "expected ~20.0, got {}", width);
+}
+
+// ────────────────────────────────────────────────────────────
+// Task #290: resolve_last_tab_pending — cross-run 탭 감지 헬퍼
+// ────────────────────────────────────────────────────────────
+
+/// ext[2] 생성 편의: high=tab_type_enum+1, low=fill_type
+fn mk_ext(width_hu: u16, tab_kind_hi: u8, fill_lo: u8) -> [u16; 7] {
+    let tab_type = ((tab_kind_hi as u16) << 8) | (fill_lo as u16);
+    [width_hu, 0, tab_type, 0, 0, 0, 9]
+}
+
+fn mk_text_style() -> TextStyle {
+    TextStyle {
+        font_size: 12.0,
+        font_family: String::new(),
+        line_x_offset: 0.0,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn task290_inline_left_returns_none() {
+    // inline 이 LEFT (ext[2] high=1) 이면 pending 없음 — 본 수정의 핵심
+    let ext = vec![mk_ext(100, 1, 0)]; // LEFT, fill=none
+    let ts = mk_text_style();
+    let tab_stops = vec![TabStop { position: 22.0, tab_type: 0, fill_type: 0 }];
+    let result = super::paragraph_layout::resolve_last_tab_pending(
+        "abc\t", 0, &ext, &ts, &tab_stops, 48.0, true, 420.0,
+    );
+    assert_eq!(result, None, "LEFT inline 은 pending 없음");
+}
+
+#[test]
+fn task290_inline_right_uses_tabdef() {
+    // inline 이 RIGHT (ext[2] high=2) 면 TabDef find_next_tab_stop 경로로 폴스루
+    let ext = vec![mk_ext(200, 2, 3)]; // RIGHT, fill=dot
+    let ts = mk_text_style();
+    let tab_stops = vec![TabStop { position: 300.0, tab_type: 1, fill_type: 3 }];
+    let result = super::paragraph_layout::resolve_last_tab_pending(
+        "abc\t", 0, &ext, &ts, &tab_stops, 48.0, false, 420.0,
+    );
+    assert_eq!(result, Some((300.0, 1, 3)), "RIGHT inline → TabDef 기반 위치, fill=dot");
+}
+
+#[test]
+fn task290_inline_center_uses_tabdef() {
+    // inline 이 CENTER (ext[2] high=3) 면 TabDef 기반 위치
+    let ext = vec![mk_ext(150, 3, 0)]; // CENTER
+    let ts = mk_text_style();
+    let tab_stops = vec![TabStop { position: 200.0, tab_type: 2, fill_type: 0 }];
+    let result = super::paragraph_layout::resolve_last_tab_pending(
+        "abc\t", 0, &ext, &ts, &tab_stops, 48.0, false, 420.0,
+    );
+    assert_eq!(result, Some((200.0, 2, 0)), "CENTER inline → TabDef 기반 위치, fill 없음");
+}
+
+#[test]
+fn task290_no_inline_fallback_to_tabdef() {
+    // inline_tabs 가 비었으면 TabDef 폴백 — 기존 동작 유지
+    let ext: Vec<[u16; 7]> = vec![];
+    let ts = mk_text_style();
+    let tab_stops = vec![TabStop { position: 250.0, tab_type: 1, fill_type: 0 }];
+    let result = super::paragraph_layout::resolve_last_tab_pending(
+        "abc\t", 0, &ext, &ts, &tab_stops, 48.0, false, 420.0,
+    );
+    assert_eq!(result, Some((250.0, 1, 0)), "inline 없음 → TabDef RIGHT stop 사용, fill 없음");
+}
+
+#[test]
+fn task290_no_inline_auto_tab_right_fallthrough() {
+    // inline 없음 + TabDef stop 소진 + auto_tab_right=true → 우측 끝 RIGHT (기존 동작 유지)
+    let ext: Vec<[u16; 7]> = vec![];
+    let ts = mk_text_style();
+    let tab_stops = vec![TabStop { position: 10.0, tab_type: 0, fill_type: 0 }]; // 이미 지나친 stop
+    let result = super::paragraph_layout::resolve_last_tab_pending(
+        "abcdef\t", 0, &ext, &ts, &tab_stops, 48.0, true, 420.0,
+    );
+    assert!(result.is_some(), "auto_tab_right 폴스루 → Some");
+    let (tp, tt, _ft) = result.unwrap();
+    assert_eq!(tt, 1, "auto_tab_right 은 RIGHT(1)");
+    assert!((tp - 420.0).abs() < 0.1, "tab_pos 는 available_width 에 고정");
+}
+
+// [Task #296] inline_tab_type 헬퍼 단위 테스트
+// HWP tab_extended 의 ext[2] 포맷: high byte = 탭 종류 enum+1, low byte = fill_type
+
+#[test]
+fn task296_inline_tab_type_left() {
+    // ext[2] = 0x0100 (256) → high=1 = LEFT (exam_math #18 실측 케이스)
+    let ext = [132u16, 0, 0x0100, 0, 0, 0, 9];
+    assert_eq!(super::text_measurement::inline_tab_type(&ext), 1);
+}
+
+#[test]
+fn task296_inline_tab_type_right() {
+    // ext[2] = 0x0203 (515) → high=2 = RIGHT, low=3 = fill=dot
+    //         (hwp-3.0-HWPML 저작권\t1 실측 케이스, PR #292 트러블슈팅 기록)
+    let ext = [200u16, 0, 0x0203, 0, 0, 0, 9];
+    assert_eq!(super::text_measurement::inline_tab_type(&ext), 2);
+}
+
+#[test]
+fn task296_inline_tab_type_center() {
+    // ext[2] = 0x0300 → high=3 = CENTER
+    let ext = [150u16, 0, 0x0300, 0, 0, 0, 9];
+    assert_eq!(super::text_measurement::inline_tab_type(&ext), 3);
+}
+
+#[test]
+fn task296_inline_tab_type_decimal() {
+    // ext[2] = 0x0400 → high=4 = DECIMAL
+    let ext = [100u16, 0, 0x0400, 0, 0, 0, 9];
+    assert_eq!(super::text_measurement::inline_tab_type(&ext), 4);
 }
