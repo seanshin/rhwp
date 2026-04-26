@@ -69,44 +69,39 @@ Foundation  Typeset   Collab    Complete
 - Pagination (multi-column split, table row split), headers/footers, master pages, footnotes
 - SVG export (CLI) + Canvas rendering (WASM/Web)
 - Web editor + hwpctl-compatible API (30 Actions, Field API)
-- 935+ tests
+- 1000+ tests
 
-#### Recent Changes (v0.7.3 / extension v0.2.1, 2026-04-21)
+#### In Progress — devel (2026-04-27)
 
-**rhwp-studio (library 0.7.3)**
-- HWPX-source documents: save disabled with user notification ([#196](https://github.com/edwardkim/rhwp/issues/196)) — prevents data loss until the HWPX→HWP full converter ([#197](https://github.com/edwardkim/rhwp/issues/197)) lands
-- HWPX→HWP IR mapping adapter assets preserved ([#178](https://github.com/edwardkim/rhwp/issues/178)) — rhwp self-roundtrip 100% recovered; Hancom compatibility deferred to #197
-- HWPX interleaved control char-offset fix for linebreak/embedded controls ([#213](https://github.com/edwardkim/rhwp/pull/213) by @jskang / [@yl-star7](https://github.com/yl-star7))
-- OLE / Chart / EMF native rendering — `<hp:pic>` placeholders, OOXML chart SVG, and native Skia-free EMF → SVG converter for the first time (external contribution by [@planet6897](https://github.com/planet6897) — PR [#221](https://github.com/edwardkim/rhwp/pull/221), 14-stage work)
-- HWPX SVG snapshot regression harness ([#173](https://github.com/edwardkim/rhwp/issues/173)) with `UPDATE_GOLDEN=1` regeneration (external contribution by [@seunghan91](https://github.com/seunghan91) — PR [#181](https://github.com/edwardkim/rhwp/pull/181))
-- Polygon resize + drag preview + shape-click-to-front (external contribution by [@bapdodi](https://github.com/bapdodi) — PR [#215](https://github.com/edwardkim/rhwp/pull/215))
-- Rotated shape resize cursor improvement + Flip handling (external contribution by [@bapdodi](https://github.com/bapdodi) — PR [#192](https://github.com/edwardkim/rhwp/pull/192))
-- HWP image effects (grayscale/black-and-white) reflected in SVG (external contribution by [@marsimon](https://github.com/marsimon) — PR [#149](https://github.com/edwardkim/rhwp/pull/149))
-- Windows CFB path separator fix (external contribution by [@dreamworker0](https://github.com/dreamworker0) — PR [#152](https://github.com/edwardkim/rhwp/pull/152))
-- HWPX Serializer — Document IR → HWPX save (external contribution by [@seunghan91](https://github.com/seunghan91) — PR [#170](https://github.com/edwardkim/rhwp/pull/170))
-- HWPX ZIP entry decompression cap + strikeout shape whitelist (external contribution by [@seunghan91](https://github.com/seunghan91) — PR [#153](https://github.com/edwardkim/rhwp/pull/153), PR [#154](https://github.com/edwardkim/rhwp/pull/154))
-- Shape resize width/height clamp (external contribution by [@seunghan91](https://github.com/seunghan91) — PR [#163](https://github.com/edwardkim/rhwp/pull/163))
-- Mobile dropdown menu icon/label overlap fix (external contribution by [@seunghan91](https://github.com/seunghan91) — PR [#161](https://github.com/edwardkim/rhwp/pull/161))
+**Under investigation**
+- TAC outer table content clipping — kps-ai p56 regression ([#362](https://github.com/edwardkim/rhwp/issues/362))
+- exam_eng.hwp 9→8 page regression — PR #343 follow-up ([#345](https://github.com/edwardkim/rhwp/issues/345))
 
-**rhwp-chrome / Edge extension (v0.2.1)**
-- Chrome Web Store and Microsoft Edge Add-ons approved (2026-04-21)
-- Restored "remember last save location" for general file downloads while the extension is active ([#198](https://github.com/edwardkim/rhwp/issues/198))
-- Options page CSP fix ([#166](https://github.com/edwardkim/rhwp/issues/166))
-- CodeQL alert #16 (shell injection in build.mjs) resolved via `execFileSync` migration
-- HWP files: `Ctrl+S` overwrites the same file directly (external contribution by [@ahnbu](https://github.com/ahnbu) — PR [#189](https://github.com/edwardkim/rhwp/pull/189))
-- Thumbnail loading spinner cleanup + options CSP compatibility (external contribution by [@postmelee](https://github.com/postmelee) — PR [#168](https://github.com/edwardkim/rhwp/pull/168))
-- Block empty viewer tab on DEXT5-style download handlers
+**Planned**
+- Image effects: brightness/contrast attributes in SVG ([#150](https://github.com/edwardkim/rhwp/issues/150)) — plan registered
+- Official integration of Hancom PDF-based Visual Diff pipeline ([#253](https://github.com/edwardkim/rhwp/issues/253))
 
-**rhwp-firefox extension (v0.1.1, AMO submission pending)**
-- Firefox MV3 port of rhwp-chrome with `browser.*` namespace, Event Page background, and CSP-compatible options (external contribution by [@postmelee](https://github.com/postmelee) — PR [#169](https://github.com/edwardkim/rhwp/pull/169))
-- `__APP_VERSION__` regression fix in `vite.config.ts` (external contribution by [@postmelee](https://github.com/postmelee) — PR [#209](https://github.com/edwardkim/rhwp/pull/209))
-- Shared `rhwp-shared/sw/download-interceptor-common.js` module with #198 blacklist / MIME logic wired into Firefox's `onCreated`+`onChanged` dual-callback flow (external contribution by [@postmelee](https://github.com/postmelee) — PR [#214](https://github.com/edwardkim/rhwp/pull/214))
+---
 
-**rhwp-safari extension (v0.2.1)**
-- Content-script `init()` gate split to honor hoverPreview / autoOpen independently from showBadges (external contribution by [@postmelee](https://github.com/postmelee) — PR [#224](https://github.com/edwardkim/rhwp/pull/224))
+#### Recent Changes (v0.7.6, 2026-04-26)
+
+**Rendering quality**
+- Non-TAC wrap=TopAndBottom table out-of-flow placement ([#157](https://github.com/edwardkim/rhwp/issues/157)) — fixed table/text overlap with Para-relative float tables, PR [#266](https://github.com/edwardkim/rhwp/pull/266) by [@seanshin](https://github.com/seanshin)
+- Right tab leading-space handling unified across 3 paths ([#267](https://github.com/edwardkim/rhwp/issues/267)) — TOC page number alignment offset (~9.33px) fixed, PR [#273](https://github.com/edwardkim/rhwp/pull/273) by [@seanshin](https://github.com/seanshin)
+- TOC leader dots + sub-heading page number alignment ([#279](https://github.com/edwardkim/rhwp/issues/279)) — Hancom-equivalent rendering, PR [#282](https://github.com/edwardkim/rhwp/pull/282) by [@seanshin](https://github.com/seanshin)
+- Rendering accuracy — Geometric Shapes full-width, TAC table leading text x-coord, Heavy display face width fix (external contribution by [@planet6897](https://github.com/planet6897) — PR [#256](https://github.com/edwardkim/rhwp/pull/256))
+- form-002 inner table page-split defect resolved (external contribution by [@planet6897](https://github.com/planet6897) — PR [#327](https://github.com/edwardkim/rhwp/pull/327))
+- Typeset path consistency + Task #321~#332 consolidation (external contribution by [@planet6897](https://github.com/planet6897) — PR [#341](https://github.com/edwardkim/rhwp/pull/341), [#343](https://github.com/edwardkim/rhwp/pull/343))
+
+**API additions**
+- `replaceOne(query, newText, caseSensitive)` WASM API (external contribution by [@oksure](https://github.com/oksure) — PR [#334](https://github.com/edwardkim/rhwp/pull/334))
+- SVG/HTML `draw_image` now embeds real base64 data URIs (external contribution by [@oksure](https://github.com/oksure) — PR [#335](https://github.com/edwardkim/rhwp/pull/335))
+
+**Firefox extension (v0.2.2)**
+- AMO validation warnings resolved — manifest strict_min_version 142, viewer bundle security sanitize (external contribution by [@postmelee](https://github.com/postmelee) — PR [#339](https://github.com/edwardkim/rhwp/pull/339))
 
 **Thanks to contributors**
-This release cycle: [@ahnbu](https://github.com/ahnbu), [@bapdodi](https://github.com/bapdodi), [@dreamworker0](https://github.com/dreamworker0), [@marsimon](https://github.com/marsimon), [@postmelee](https://github.com/postmelee), [@seunghan91](https://github.com/seunghan91), [@seo-rii](https://github.com/seo-rii), [@planet6897](https://github.com/planet6897), [@yl-star7](https://github.com/yl-star7)
+This release cycle: [@oksure](https://github.com/oksure), [@planet6897](https://github.com/planet6897), [@postmelee](https://github.com/postmelee), [@seanshin](https://github.com/seanshin)
 
 ### v1.0.0 — Typesetting Engine
 
